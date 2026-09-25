@@ -87,13 +87,15 @@ python -m recipe.denoise_v2.task_suite.setup_environment --benchmark scienceworl
 
 WebShop 需要完整商品、属性、human instructions、spaCy 小模型和搜索索引。旧 `setup.sh` 默认禁用，不再用于这套安装流程。下面的数据脚本会复用已下载文件，在临时目录建完整索引，并保留旧索引备份；不会安装 Python/Conda 包。1000 商品集不用于标准划分。
 
+数据下载默认使用固定版本的 Hugging Face 完整副本，并校验大小与 SHA256。Google Drive 原链接获取失败时无需重装环境；可用 `--hf-endpoint https://hf-mirror.com` 选择 HF 镜像，具体来源、续传与离线复制步骤见 [数据准备文档](ENVIRONMENTS.md#2-准备数据与任务清单)。
+
 ScienceWorld 固定 [官方仓库](https://github.com/allenai/ScienceWorld) 包含确定性 reset 改进的源码提交，版本见 [依赖文件](requirements-scienceworld.txt)。安装器同时安装 Java 11。`prepare_tasks` 保存实际 Python 包版本和 JAR SHA256，运行时不匹配会报错；baseline/denoise 保持同一版本。
 
 ScienceWorld 安装包包含模拟器 JAR 和任务定义，variation 在本地生成，无需另下商品式数据集。`prepare_tasks` 只枚举已安装的本地环境、写出清单与 parquet，不负责下载模型或原始数据。
 
 ```bash
 conda activate denoise-webshop
-python -m recipe.denoise_v2.task_suite.prepare_webshop_assets --download --build-index
+python -m recipe.denoise_v2.task_suite.prepare_webshop_assets --download --source huggingface --build-index
 
 # 从仓库根目录运行；仅发现任务及生成本地 parquet，不运行训练。
 python -m recipe.denoise_v2.task_suite.prepare_tasks \

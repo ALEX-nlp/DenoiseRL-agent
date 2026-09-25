@@ -33,7 +33,7 @@ python -m recipe.denoise_v2.task_suite.setup_environment \
   --benchmark webshop --mode fresh --resume --mirror official
 ```
 
-`--dry-run` 会显示所用源的完整 URL。GitHub 上的 ScienceWorld、spaCy 模型及可能的 FlashAttention wheel，Google Drive 数据和 Hugging Face 模型下载仍使用原地址。克隆会复用本地缓存；Conda 若必须补下载源环境的精确包，可能仍访问该包记录中的原 URL。
+`--dry-run` 会显示所用源的完整 URL。GitHub 上的 ScienceWorld、spaCy 模型及可能的 FlashAttention wheel，以及 Hugging Face 数据/模型不通过 Conda/pip 内网索引下载。WebShop 支持单独配置 HF 下载端点，见下文。克隆会复用本地缓存；Conda 若必须补下载源环境的精确包，可能仍访问该包记录中的原 URL。
 
 ## 1. 创建环境：选择一种方式
 
@@ -112,7 +112,8 @@ python -m recipe.denoise_v2.task_suite.setup_environment --benchmark scienceworl
 conda activate denoise-webshop
 
 # 已下载的完整 JSON 会复用；在临时目录重建完整搜索索引，成功后保留旧索引备份。
-python -m recipe.denoise_v2.task_suite.prepare_webshop_assets --download --build-index
+python -m recipe.denoise_v2.task_suite.prepare_webshop_assets \
+  --download --source huggingface --build-index
 
 python -m recipe.denoise_v2.task_suite.prepare_tasks \
   --benchmark webshop --train-batch-size 16 --webshop-rho-grouping structure \
@@ -122,7 +123,22 @@ python -m recipe.denoise_v2.task_suite.smoke_env \
   --benchmark webshop --manifest recipe/denoise_v2/local_data/webshop/tasks.json
 ```
 
-数据脚本仅下载和建索引，不执行任何 pip / conda 安装。文件保存在 bundled WebShop 的 `data/`，索引在 `search_engine/indexes/`；它们与模型缓存均可在不同 Conda 环境间复用。此前完整下载成功的 `items_shuffle.json`、`items_ins_v2.json`、`items_human_ins.json` 会直接使用，已有文件须完整有效。第一次迁移仍建议重建一次索引，避免沿用旧脚本生成的小商品集索引。失败的下载保留 `.partial`，不会替代目标文件。
+数据脚本仅下载和建索引，不执行任何 pip / conda 安装。默认来源已改为 [HongbangYuan/webshop 的固定版本](https://huggingface.co/datasets/HongbangYuan/webshop/tree/0129d4a81dbdb827e76afd20a1e2c38b61098613)，是社区托管的完整数据副本。三份文件的大小与校验值已和 [YWZBrandon/webshop-data](https://huggingface.co/datasets/YWZBrandon/webshop-data/tree/ce990fff5aee388db2706f07820c578ab68e0453) 交叉核对；大文件读取 HF LFS 元数据，小型人工指令文件另行下载计算 SHA256。未重新下载 Google Drive 原文件做逐字节比较。
+
+`items_shuffle.json` 约 5.48 GB，`items_ins_v2.json` 约 186 MB，`items_human_ins.json` 约 5.14 MB。文件保存在 bundled WebShop 的 `data/`，索引在 `search_engine/indexes/`。下载先写入 `data/.hf-download/`，完成后流式校验大小与 SHA256，再移动到目标位置；HF 下载中断后可重跑相同命令继续。已有 JSON 校验通过后复用；校验不符会报出具体文件，不覆盖原文件。请给数据和索引的临时构建文件预留磁盘空间。
+
+若服务器不能直连 Hugging Face，可使用 [HF-Mirror](https://hf-mirror.com/) 或其他可访问的兼容端点：
+
+```bash
+HF_HUB_DISABLE_XET=1 \
+python -m recipe.denoise_v2.task_suite.prepare_webshop_assets \
+  --download --source huggingface --hf-endpoint https://hf-mirror.com \
+  --build-index --threads 4
+```
+
+也支持环境变量 `HF_ENDPOINT`。显式 `--hf-endpoint` 优先；下载公共数据时不发送已保存的 HF token。镜像连通性仍需在目标服务器验证，内网 pip 源不会代理 HF 或 Google Drive。Google Drive 保留为 `--source google-drive`，使用原始链接与 `.json.partial` 临时文件；原链接获取失败时建议改用 Hugging Face，无需重装环境。
+
+如果只能在其他机器下载，可从上面的固定版本获取这三个 JSON 并复制到 bundled WebShop 的 `data/`，随后在训练服务器执行 `python -m recipe.denoise_v2.task_suite.prepare_webshop_assets --build-index`。第一次迁移建议重建完整索引，避免沿用旧脚本生成的小商品集索引。旧的 Google Drive `.partial` 不会被当成完整数据或拼接到 HF 下载。
 
 仅需要 `en_core_web_sm`，已随依赖安装；不下载 `en_core_web_lg`。不需要启动 Flask 服务或真实浏览器。旧 `webshop/setup.sh` 默认禁用，防止再次修改当前环境；仅显式设置 `WEBSHOP_ALLOW_LEGACY_INSTALL=1` 才能运行旧流程，新训练流程无需该开关。
 
@@ -170,6 +186,6 @@ ScienceWorld 同样使用对应脚本和独立实验名。两步 smoke 主要检
 
 ## 联网与验证范围
 
-首次安装默认通过内网 Nexus 源获取 Conda / PyPI 包，同时需要访问 GitHub（ScienceWorld、spaCy 模型，以及可能的 FlashAttention wheel）；这些固定直链没有对应的内网制品地址，不能仅靠包索引换源替代。WebShop 数据来自 Google Drive。模型权重来自 Hugging Face，已有 ALFWorld 的本地 Qwen2.5 模型可通过 `MODEL_PATH` / `DENOISE_MODEL_PATH` 复用，不必重复下载。依赖、JAR、数据、索引和模型齐备后可以离线运行，相关变量见 [任务文档](README.md)。
+首次安装默认通过内网 Nexus 源获取 Conda / PyPI 包，同时需要访问 GitHub（ScienceWorld、spaCy 模型，以及可能的 FlashAttention wheel）；这些固定直链没有对应的内网制品地址，不能仅靠包索引换源替代。WebShop 数据默认来自固定版本的 Hugging Face 副本，也支持原始 Google Drive 来源。模型权重来自 Hugging Face，已有 ALFWorld 的本地 Qwen2.5 模型可通过 `MODEL_PATH` / `DENOISE_MODEL_PATH` 复用，不必重复下载。依赖、JAR、数据、索引和模型齐备后可以离线运行，相关变量见 [任务文档](README.md)。
 
 开发时已针对 Linux x86_64 / Python 3.10 解析两个 fresh profile 的依赖；FlashAttention 单独安装，尚未验证其编译与 CUDA ABI。CPU 测试覆盖安装目标隔离、失败恢复和数据索引替换。未在本地 macOS 上创建这些 CUDA 环境，服务器上的完整安装、原生环境 smoke test 和 GPU 短训练仍需实际执行。

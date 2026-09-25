@@ -1,6 +1,7 @@
 """Installer isolation and index recovery contracts; never runs an installer."""
 
 from contextlib import ExitStack, redirect_stdout
+import hashlib
 import io
 import json
 import os
@@ -253,6 +254,80 @@ class EnvironmentCheckTests(unittest.TestCase):
 
 
 class AssetRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        # Small files exercise the same integrity checks without downloading GBs.
+        checksum = hashlib.sha256(b"{}").hexdigest()
+        patcher = patch.object(assets, "ASSET_CHECKSUMS", {name: (2, checksum) for name in assets.ASSETS})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_hf_download_pins_revision_and_reuses_completed_files_on_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            calls = []
+            fail_once = [True]
+            hub = types.ModuleType("huggingface_hub")
+            def download(**kwargs):
+                calls.append(kwargs)
+                stage = Path(kwargs["local_dir"])
+                stage.mkdir(exist_ok=True)
+                if kwargs["filename"] == "items_ins_v2.json" and fail_once[0]:
+                    fail_once[0] = False
+                    (stage / "retained.incomplete").write_bytes(b"partial")
+                    raise ConnectionError("interrupted")
+                path = stage / kwargs["filename"]
+                path.write_bytes(b"{}")
+                return str(path)
+            hub.hf_hub_download = download
+            with patch.dict(sys.modules, {"huggingface_hub": hub}), \
+                 patch.dict(os.environ, {}, clear=False), \
+                 patch.object(assets.subprocess, "run", side_effect=AssertionError("Unexpected gdown call")), \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, "Retry the same command"):
+                    assets.prepare_assets(data, download=True, hf_endpoint="https://hf-mirror.com")
+                self.assertEqual((data / "items_shuffle.json").read_bytes(), b"{}")
+                self.assertFalse((data / "items_ins_v2.json").exists())
+                self.assertTrue((data / ".hf-download/retained.incomplete").is_file())
+                assets.prepare_assets(data, download=True, hf_endpoint="https://hf-mirror.com")
+            self.assertEqual([c["filename"] for c in calls], ["items_shuffle.json", "items_ins_v2.json",
+                                                             "items_ins_v2.json", "items_human_ins.json"])
+            for call in calls:
+                self.assertEqual(call["repo_id"], "HongbangYuan/webshop")
+                self.assertEqual(call["revision"], "0129d4a81dbdb827e76afd20a1e2c38b61098613")
+                self.assertEqual(call["repo_type"], "dataset")
+                self.assertEqual(call["endpoint"], "https://hf-mirror.com")
+                self.assertFalse(call["token"])
+            self.assertTrue(all((data / name).is_file() for name in assets.ASSETS))
+
+    def test_incomplete_or_corrupt_download_is_not_promoted(self):
+        for content in (b"<html>error page</html>", b"[]"):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as directory:
+                data = Path(directory)
+                stage = data / "download.partial"
+                stage.write_bytes(content)
+                with patch.object(assets, "download_asset", return_value=stage), redirect_stdout(io.StringIO()):
+                    with self.assertRaises(ValueError):
+                        assets.prepare_assets(data, download=True)
+                self.assertFalse((data / "items_shuffle.json").exists())
+                self.assertEqual(stage.read_bytes(), content)
+
+    def test_existing_invalid_data_is_preserved_and_does_not_trigger_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            path = data / "items_shuffle.json"
+            path.write_bytes(b"[]")
+            with patch.object(assets, "download_asset", side_effect=AssertionError("Overwrote existing data")), \
+                 redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
+                    assets.prepare_assets(data, download=True)
+            self.assertEqual(path.read_bytes(), b"[]")
+
+    def test_google_drive_failure_has_actionable_alternative(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(assets.subprocess, "run",
+                side_effect=subprocess.CalledProcessError(1, ["gdown"])):
+            with self.assertRaisesRegex(RuntimeError, "--source huggingface"):
+                assets.download_asset("items_shuffle.json", Path(directory), "google-drive")
+
     def test_assets_require_completed_webshop_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             prefix = Path(directory)
