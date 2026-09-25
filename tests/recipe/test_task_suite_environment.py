@@ -52,10 +52,18 @@ class InstallationIsolationTests(unittest.TestCase):
             self.invoke(["--benchmark", "webshop", "--mode", "clone"], [source, None, target], commands.append)
             self.assertEqual(commands[0][-6:], ["--prefix", str(source), "python", "-m", "pip", "check"])
             self.assertIn("--copy", commands[1])
+            self.assertIn("--override-channels", commands[1])
+            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main", commands[1])
             for command in commands[2:]:
                 self.assertEqual(str(command[command.index("--prefix") + 1]), str(target))
                 self.assertNotIn(str(source), map(str, command))
             self.assertFalse(any("flash-attn==2.7.4.post1" in c for c in commands))
+            java_install = next(c for c in commands if "openjdk=11" in c)
+            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge", java_install)
+            for command in commands:
+                if "pip" in command and "install" in command:
+                    self.assertEqual(command[command.index("--index-url") + 1],
+                                     "https://pypi.tuna.tsinghua.edu.cn/simple")
             self.assertEqual(json.loads((target / setup.MARKER / "setup.json").read_text())["status"],
                              "dependencies_checked")
             self.assertEqual(list(source.iterdir()), [])
@@ -81,13 +89,25 @@ class InstallationIsolationTests(unittest.TestCase):
                 self.invoke(["--benchmark", "scienceworld"], [None, target], fail_install)
             marker = target / setup.MARKER / "setup.json"
             self.assertEqual(json.loads(marker.read_text())["status"], "failed")
+            # Older installers did not record the mirror. Their failed
+            # environments must remain resumable when switching download sources.
+            saved = json.loads(marker.read_text())
+            saved.pop("mirror")
+            marker.write_text(json.dumps(saved))
             with self.assertRaisesRegex(ValueError, "parameters differ"):
                 self.invoke(["--benchmark", "webshop", "--resume"], [target],
                             lambda command: self.fail("Modified mismatched environment"))
             commands = []
-            self.invoke(["--benchmark", "scienceworld", "--resume"], [target], commands.append)
+            self.invoke(["--benchmark", "scienceworld", "--resume", "--mirror", "official"],
+                        [target], commands.append)
             self.assertFalse(any("create" in c for c in commands))
             self.assertEqual(json.loads(marker.read_text())["status"], "dependencies_checked")
+            self.assertEqual(json.loads(marker.read_text())["mirror"], "official")
+            for command in commands:
+                self.assertNotIn("tuna.tsinghua.edu.cn", " ".join(map(str, command)))
+                if "pip" in command and "install" in command:
+                    self.assertEqual(command[command.index("--index-url") + 1], "https://pypi.org/simple")
+            self.assertIn("https://conda.anaconda.org/conda-forge", commands[0])
 
     def test_pip_redirection_is_removed(self):
         with patch.dict(os.environ, {"PIP_TARGET": "/source", "PYTHONPATH": "/source",
@@ -120,6 +140,10 @@ class InstallationIsolationTests(unittest.TestCase):
                 setup.main()
             self.assertIn("/CONDA_ENVS/denoise-webshop", output.getvalue())
             self.assertNotIn("setup.sh", output.getvalue())
+            self.assertIn("--override-channels", output.getvalue())
+            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main", output.getvalue())
+            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge", output.getvalue())
+            self.assertIn("--index-url https://pypi.tuna.tsinghua.edu.cn/simple", output.getvalue())
 
     def test_legacy_setup_stops_before_running_any_installer(self):
         env = dict(os.environ)

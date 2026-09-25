@@ -9,6 +9,23 @@
 
 安装器适用于 Linux x86_64 的 NVIDIA GPU 训练机器。以下命令均在服务器的仓库根目录执行。原来的 `molu` 不作为安装目标。
 
+### 默认下载源
+
+安装脚本默认使用清华镜像（`--mirror tuna`），无需手动配置 `.condarc` 或执行 `export`：
+
+- Conda 的 `pkgs/main`、`pkgs/r` 与安装 Java 所需的 `conda-forge` 均使用清华镜像 URL，并通过 `--override-channels` 指定本次使用的频道。
+- 所有 pip 安装命令显式使用 `https://pypi.tuna.tsinghua.edu.cn/simple` 作为主索引。
+- 配置仅作用于脚本发起的安装命令，不修改用户全局 Conda / pip 配置；版本约束保持不变。
+
+切回官方 Conda / PyPI 源时，在原命令后加 `--mirror official`。如果此前已进入依赖安装阶段，还可以同时加 `--resume`，切换源不会触发环境身份不匹配：
+
+```bash
+python -m recipe.denoise_v2.task_suite.setup_environment \
+  --benchmark webshop --mode fresh --resume --mirror official
+```
+
+`--dry-run` 会显示所用源的完整 URL。GitHub 上的 ScienceWorld、spaCy 模型及可能的 FlashAttention wheel，Google Drive 数据和 Hugging Face 模型下载仍使用原地址。克隆会复用本地缓存；Conda 若必须补下载源环境的精确包，可能仍访问该包记录中的原 URL。
+
 ## 1. 创建环境：选择一种方式
 
 ### 推荐：从零创建
@@ -64,7 +81,7 @@ python -m recipe.denoise_v2.task_suite.setup_environment --benchmark webshop --m
 
 安装完成前会执行 `pip check`、训练入口和核心包导入、Java 检查；WebShop 还检查文本模拟器及 spaCy 模型，ScienceWorld 会启动 JVM 并读取任务类型。记录位于新环境的 `$CONDA_PREFIX/.denoise-task-suite/`：
 
-- `setup.json`：创建方式、源环境和安装状态。
+- `setup.json`：创建方式、源环境、本次镜像选择和安装状态。
 - `pip-freeze.txt`、`check.json`：实际版本与依赖/导入检查结果。
 - `core-constraints.txt`：clone 模式的原始训练核心约束，失败重试时不会重新生成以掩盖版本变化。
 
@@ -136,6 +153,6 @@ ScienceWorld 同样使用对应脚本和独立实验名。两步 smoke 主要检
 
 ## 联网与验证范围
 
-首次安装需访问 Conda channels、PyPI、GitHub（ScienceWorld、spaCy 模型，以及可能的 FlashAttention wheel）；WebShop 数据来自 Google Drive。模型权重来自 Hugging Face，已有 ALFWorld 的本地 Qwen2.5 模型可通过 `MODEL_PATH` / `DENOISE_MODEL_PATH` 复用，不必重复下载。依赖、JAR、数据、索引和模型齐备后可以离线运行，相关变量见 [任务文档](README.md)。
+首次安装默认通过清华镜像获取 Conda / PyPI 包，同时需要访问 GitHub（ScienceWorld、spaCy 模型，以及可能的 FlashAttention wheel）；WebShop 数据来自 Google Drive。模型权重来自 Hugging Face，已有 ALFWorld 的本地 Qwen2.5 模型可通过 `MODEL_PATH` / `DENOISE_MODEL_PATH` 复用，不必重复下载。依赖、JAR、数据、索引和模型齐备后可以离线运行，相关变量见 [任务文档](README.md)。
 
 开发时已针对 Linux x86_64 / Python 3.10 解析两个 fresh profile 的依赖；FlashAttention 单独安装，尚未验证其编译与 CUDA ABI。CPU 测试覆盖安装目标隔离、失败恢复和数据索引替换。未在本地 macOS 上创建这些 CUDA 环境，服务器上的完整安装、原生环境 smoke test 和 GPU 短训练仍需实际执行。
