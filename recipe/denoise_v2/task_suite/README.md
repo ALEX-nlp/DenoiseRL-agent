@@ -77,7 +77,7 @@ WebShop 每 16 个逻辑环境共用一个 Ray actor 内的商品库/搜索索�
 
 WebShop 与 ScienceWorld 分别使用独立的 Python 3.10 Conda 环境；每个环境同时支持 baseline 和 DenoiseRL。安装器支持从零创建和从健康的 `molu` 克隆，所有安装显式指向新环境，不修改源环境。详见 [环境创建、数据准备与检查](ENVIRONMENTS.md)。已存在依赖冲突时推荐 fresh。
 
-Conda 与 pip 默认使用清华镜像，无需额外配置；在安装命令后加 `--mirror official` 可切回官方源，也可在 `--resume` 续装时切换。
+Conda 与 pip 默认使用内网 `nexus.sii.shaipower.online` 源，无需额外配置；pip 默认端点为 `pypi_proxy/simple/`，自动添加 trusted-host 和 120 秒超时。`--pip-index-url` 可改用内网的 `pypi/simple/`。`--mirror tuna` / `--mirror official` 可显式选择清华 / 官方源，也可在 `--resume` 续装时切换，详见 [下载源设置](ENVIRONMENTS.md#默认下载源)。
 
 ```bash
 # 在 Linux GPU 服务器的仓库根目录创建。

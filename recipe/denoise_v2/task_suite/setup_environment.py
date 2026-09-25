@@ -9,11 +9,21 @@ import re
 import shlex
 import shutil
 import subprocess
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[3]
 HERE = Path(__file__).resolve().parent
 MARKER = ".denoise-task-suite"
+DEFAULT_MIRROR = "internal"
+INTERNAL_HOST = "nexus.sii.shaipower.online"
+INTERNAL_REPOSITORY = f"http://{INTERNAL_HOST}/repository"
 MIRRORS = {
+    "internal": {
+        "defaults": [f"{INTERNAL_REPOSITORY}/anaconda/pkgs/main",
+                     f"{INTERNAL_REPOSITORY}/anaconda/pkgs/r"],
+        "conda_forge": f"{INTERNAL_REPOSITORY}/anaconda/cloud/conda-forge",
+        "pip": f"{INTERNAL_REPOSITORY}/pypi_proxy/simple/",
+    },
     "tuna": {
         "defaults": ["https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main",
                      "https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/r"],
@@ -36,16 +46,28 @@ def conda_channels(mirror, include_forge=False):
     return ["--override-channels"] + [arg for channel in channels for arg in ("--channel", channel)]
 
 
-def creation_command(conda, name, mode, source, mirror="tuna"):
+def creation_command(conda, name, mode, source, mirror=DEFAULT_MIRROR):
     command = [conda, "create", "--yes", "--name", name] + conda_channels(mirror)
     return command + (["--clone", str(source), "--copy"] if mode == "clone" else ["python=3.10", "pip"])
+
+
+def pip_source_args(mirror, index_url=None):
+    index_url = index_url or MIRRORS[mirror]["pip"]
+    args = ["--index-url", index_url, "--timeout", "120"]
+    if urlsplit(index_url).hostname == INTERNAL_HOST:
+        args += ["--trusted-host", INTERNAL_HOST]
+    return args
 
 
 def isolated_env():
     env = dict(os.environ)
     for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "JAVA_HOME", "PIP_TARGET", "PIP_PREFIX",
-                "PIP_USER", "PIP_REQUIREMENT", "PIP_CONSTRAINT"):
+                "PIP_USER", "PIP_REQUIREMENT", "PIP_CONSTRAINT", "PIP_INDEX_URL",
+                "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_NO_INDEX", "PIP_TRUSTED_HOST"):
         env.pop(key, None)
+    # Use the explicit per-command index/trusted host, including in pip build
+    # subprocesses. Old pip.conf files must not add public fallback indexes.
+    env["PIP_CONFIG_FILE"] = os.devnull
     env["PYTHONNOUSERSITE"] = "1"
     return env
 
@@ -69,10 +91,10 @@ def environment_prefix(conda, name):
     return matches[0] if matches else None
 
 
-def installation_commands(conda, prefix, benchmark, mode, mirror="tuna"):
+def installation_commands(conda, prefix, benchmark, mode, mirror=DEFAULT_MIRROR, pip_index_url=None):
     prefix = Path(prefix)
     target_python = [conda, "run", "--no-capture-output", "--prefix", str(prefix), "python"]
-    pip_install = target_python + ["-m", "pip", "install", "--index-url", MIRRORS[mirror]["pip"]]
+    pip_install = target_python + ["-m", "pip", "install"] + pip_source_args(mirror, pip_index_url)
     records = prefix / MARKER
     constraints = HERE / "envs/train-constraints.txt" if mode == "fresh" else records / "core-constraints.txt"
     commands = []
@@ -99,8 +121,9 @@ def main():
     parser.add_argument("--benchmark", choices=["webshop", "scienceworld"], required=True)
     parser.add_argument("--mode", choices=["fresh", "clone"], default="fresh")
     parser.add_argument("--source-env", default="molu")
-    parser.add_argument("--mirror", choices=MIRRORS, default="tuna",
-                        help="Conda and pip download sources (default: tuna; use official to switch back)")
+    parser.add_argument("--mirror", choices=MIRRORS, default=DEFAULT_MIRROR,
+                        help="Conda and pip download sources (default: internal)")
+    parser.add_argument("--pip-index-url", help="Override the profile's pip index, e.g. the internal /pypi/simple/ endpoint")
     parser.add_argument("--name", help="Default: denoise-webshop or denoise-scienceworld")
     parser.add_argument("--resume", action="store_true", help="Resume only an environment created by this script")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without reading or changing Conda")
@@ -110,7 +133,8 @@ def main():
     if args.dry_run:
         if not args.resume:
             print(shlex.join(creation_command("conda", name, args.mode, args.source_env, args.mirror)))
-        for command in installation_commands("conda", f"/CONDA_ENVS/{name}", args.benchmark, args.mode, args.mirror):
+        for command in installation_commands("conda", f"/CONDA_ENVS/{name}", args.benchmark, args.mode,
+                                             args.mirror, args.pip_index_url):
             print(shlex.join(command))
         return
     if platform.system() != "Linux" or platform.machine() != "x86_64":
@@ -125,11 +149,28 @@ def main():
     identity = {"benchmark": args.benchmark, "mode": args.mode, "source_prefix": str(source) if source else None}
     if prefix:
         marker = prefix / MARKER / "setup.json"
-        if prefix == source or not args.resume or not marker.is_file():
-            raise ValueError(f"Refusing to change existing environment {prefix}. Use a new name.")
+        if prefix == source:
+            raise ValueError(f"Refusing to install into source environment {prefix}. Use a new name.")
+        if not marker.is_file():
+            raise ValueError(
+                f"Refusing to change existing environment {prefix}: installer record is missing at {marker}. "
+                "--resume requires this record. The environment may have been created manually or "
+                "interrupted before setup was recorded; inspect it first, or choose a new --name."
+            )
+        if not args.resume:
+            raise ValueError(
+                f"Environment {prefix} already exists and has an installer record. "
+                "To continue installation, rerun the original setup command with --resume "
+                "and the same --benchmark, --mode and --source-env. "
+                "The --mirror and --pip-index-url options may change."
+            )
         saved = json.loads(marker.read_text())
         if any(saved.get(key) != value for key, value in identity.items()):
-            raise ValueError("Resume parameters differ from the environment's original setup")
+            raise ValueError(
+                f"Resume parameters differ from the environment's original setup. "
+                f"Check {marker}: benchmark={saved.get('benchmark')!r}, mode={saved.get('mode')!r}, "
+                f"source_prefix={saved.get('source_prefix')!r}."
+            )
     else:
         if args.resume:
             raise ValueError("Cannot resume: environment does not exist")
@@ -145,10 +186,11 @@ def main():
     records.mkdir(exist_ok=True)
     # Download sources may change on --resume without changing environment identity.
     identity["mirror"] = args.mirror
+    identity["pip_index_url"] = args.pip_index_url or MIRRORS[args.mirror]["pip"]
     identity["status"] = "installing"
     (records / "setup.json").write_text(json.dumps(identity, indent=2) + "\n")
     try:
-        for command in installation_commands(conda, prefix, args.benchmark, args.mode, args.mirror):
+        for command in installation_commands(conda, prefix, args.benchmark, args.mode, args.mirror, args.pip_index_url):
             run(command)
     except Exception:
         identity["status"] = "failed"

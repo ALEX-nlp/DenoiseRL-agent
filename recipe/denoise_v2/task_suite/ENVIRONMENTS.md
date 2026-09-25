@@ -11,13 +11,22 @@
 
 ### 默认下载源
 
-安装脚本默认使用清华镜像（`--mirror tuna`），无需手动配置 `.condarc` 或执行 `export`：
+安装脚本默认使用内网 Nexus 源（`--mirror internal`），无需手动配置 `.condarc`、pip.conf 或执行 `export`：
 
-- Conda 的 `pkgs/main`、`pkgs/r` 与安装 Java 所需的 `conda-forge` 均使用清华镜像 URL，并通过 `--override-channels` 指定本次使用的频道。
-- 所有 pip 安装命令显式使用 `https://pypi.tuna.tsinghua.edu.cn/simple` 作为主索引。
-- 配置仅作用于脚本发起的安装命令，不修改用户全局 Conda / pip 配置；版本约束保持不变。
+- Conda 的 `pkgs/main`、`pkgs/r` 均使用 `http://nexus.sii.shaipower.online/repository/anaconda/pkgs/` 下对应地址；安装 Java 所需的 `conda-forge` 使用 `http://nexus.sii.shaipower.online/repository/anaconda/cloud/conda-forge`。通过 `--override-channels` 指定本次使用的频道。
+- 所有 pip 安装命令默认使用 `http://nexus.sii.shaipower.online/repository/pypi_proxy/simple/`，并带上 `--trusted-host nexus.sii.shaipower.online --timeout 120`。
+- 安装子进程忽略旧 pip 配置文件与环境变量中的索引、额外索引、find-links 和 trusted-host，避免混入公共备用源。网络代理环境变量仍可使用。
+- 配置仅作用于脚本发起的安装命令，不修改用户全局 Conda / pip 配置；版本约束保持不变。Conda 使用用户提供的 HTTP 地址，不额外关闭全局 HTTPS 证书校验。
 
-切回官方 Conda / PyPI 源时，在原命令后加 `--mirror official`。如果此前已进入依赖安装阶段，还可以同时加 `--resume`，切换源不会触发环境身份不匹配：
+用户提供的另一个内网 pip 地址 `pypi/simple/` 可以显式选择；对应的 trusted-host 会自动添加：
+
+```bash
+python -m recipe.denoise_v2.task_suite.setup_environment \
+  --benchmark scienceworld --mode fresh --resume \
+  --pip-index-url http://nexus.sii.shaipower.online/repository/pypi/simple/
+```
+
+`--mirror tuna` 和 `--mirror official` 保留为显式选择，分别切换到清华和官方源。如果此前已进入依赖安装阶段，还可以同时加 `--resume`；切换 `--mirror` 或 `--pip-index-url` 不会触发环境身份不匹配：
 
 ```bash
 python -m recipe.denoise_v2.task_suite.setup_environment \
@@ -79,9 +88,17 @@ python -m recipe.denoise_v2.task_suite.setup_environment --benchmark webshop --m
 python -m recipe.denoise_v2.task_suite.setup_environment --benchmark webshop --mode fresh --resume
 ```
 
+遇到 `Refusing to change existing environment` 或 `Environment ... already exists` 时，若此前运行的就是这个安装脚本，在原命令后加 `--resume`，保留原来的 `--benchmark`、`--mode` 和 `--source-env`。例如 ScienceWorld 的 fresh 安装续装命令为：
+
+```bash
+python -m recipe.denoise_v2.task_suite.setup_environment --benchmark scienceworld --mode fresh --resume
+```
+
+若提示 `installer record is missing`，说明目标环境缺少 `.denoise-task-suite/setup.json`，仅加 `--resume` 不能接管它。可能是在 Conda 创建结束、脚本写入记录之前中断，也可能是手动创建的环境。先检查目标环境与 Conda 安装历史，或通过 `--name` 使用另一个新环境；不要手工伪造安装记录。`--mode clone` 创建的环境应继续使用 clone 参数。
+
 安装完成前会执行 `pip check`、训练入口和核心包导入、Java 检查；WebShop 还检查文本模拟器及 spaCy 模型，ScienceWorld 会启动 JVM 并读取任务类型。记录位于新环境的 `$CONDA_PREFIX/.denoise-task-suite/`：
 
-- `setup.json`：创建方式、源环境、本次镜像选择和安装状态。
+- `setup.json`：创建方式、源环境、本次镜像选择、pip 索引和安装状态。
 - `pip-freeze.txt`、`check.json`：实际版本与依赖/导入检查结果。
 - `core-constraints.txt`：clone 模式的原始训练核心约束，失败重试时不会重新生成以掩盖版本变化。
 
@@ -153,6 +170,6 @@ ScienceWorld 同样使用对应脚本和独立实验名。两步 smoke 主要检
 
 ## 联网与验证范围
 
-首次安装默认通过清华镜像获取 Conda / PyPI 包，同时需要访问 GitHub（ScienceWorld、spaCy 模型，以及可能的 FlashAttention wheel）；WebShop 数据来自 Google Drive。模型权重来自 Hugging Face，已有 ALFWorld 的本地 Qwen2.5 模型可通过 `MODEL_PATH` / `DENOISE_MODEL_PATH` 复用，不必重复下载。依赖、JAR、数据、索引和模型齐备后可以离线运行，相关变量见 [任务文档](README.md)。
+首次安装默认通过内网 Nexus 源获取 Conda / PyPI 包，同时需要访问 GitHub（ScienceWorld、spaCy 模型，以及可能的 FlashAttention wheel）；这些固定直链没有对应的内网制品地址，不能仅靠包索引换源替代。WebShop 数据来自 Google Drive。模型权重来自 Hugging Face，已有 ALFWorld 的本地 Qwen2.5 模型可通过 `MODEL_PATH` / `DENOISE_MODEL_PATH` 复用，不必重复下载。依赖、JAR、数据、索引和模型齐备后可以离线运行，相关变量见 [任务文档](README.md)。
 
 开发时已针对 Linux x86_64 / Python 3.10 解析两个 fresh profile 的依赖；FlashAttention 单独安装，尚未验证其编译与 CUDA ABI。CPU 测试覆盖安装目标隔离、失败恢复和数据索引替换。未在本地 macOS 上创建这些 CUDA 环境，服务器上的完整安装、原生环境 smoke test 和 GPU 短训练仍需实际执行。

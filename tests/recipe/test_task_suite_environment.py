@@ -53,17 +53,19 @@ class InstallationIsolationTests(unittest.TestCase):
             self.assertEqual(commands[0][-6:], ["--prefix", str(source), "python", "-m", "pip", "check"])
             self.assertIn("--copy", commands[1])
             self.assertIn("--override-channels", commands[1])
-            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main", commands[1])
+            self.assertIn("http://nexus.sii.shaipower.online/repository/anaconda/pkgs/main", commands[1])
             for command in commands[2:]:
                 self.assertEqual(str(command[command.index("--prefix") + 1]), str(target))
                 self.assertNotIn(str(source), map(str, command))
             self.assertFalse(any("flash-attn==2.7.4.post1" in c for c in commands))
             java_install = next(c for c in commands if "openjdk=11" in c)
-            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge", java_install)
+            self.assertIn("http://nexus.sii.shaipower.online/repository/anaconda/cloud/conda-forge", java_install)
             for command in commands:
                 if "pip" in command and "install" in command:
                     self.assertEqual(command[command.index("--index-url") + 1],
-                                     "https://pypi.tuna.tsinghua.edu.cn/simple")
+                                     "http://nexus.sii.shaipower.online/repository/pypi_proxy/simple/")
+                    self.assertEqual(command[command.index("--trusted-host") + 1], "nexus.sii.shaipower.online")
+                    self.assertEqual(command[command.index("--timeout") + 1], "120")
             self.assertEqual(json.loads((target / setup.MARKER / "setup.json").read_text())["status"],
                              "dependencies_checked")
             self.assertEqual(list(source.iterdir()), [])
@@ -93,6 +95,7 @@ class InstallationIsolationTests(unittest.TestCase):
             # environments must remain resumable when switching download sources.
             saved = json.loads(marker.read_text())
             saved.pop("mirror")
+            saved.pop("pip_index_url")
             marker.write_text(json.dumps(saved))
             with self.assertRaisesRegex(ValueError, "parameters differ"):
                 self.invoke(["--benchmark", "webshop", "--resume"], [target],
@@ -105,17 +108,26 @@ class InstallationIsolationTests(unittest.TestCase):
             self.assertEqual(json.loads(marker.read_text())["mirror"], "official")
             for command in commands:
                 self.assertNotIn("tuna.tsinghua.edu.cn", " ".join(map(str, command)))
+                self.assertNotIn("nexus.sii.shaipower.online", " ".join(map(str, command)))
                 if "pip" in command and "install" in command:
                     self.assertEqual(command[command.index("--index-url") + 1], "https://pypi.org/simple")
+                    self.assertNotIn("--trusted-host", command)
             self.assertIn("https://conda.anaconda.org/conda-forge", commands[0])
 
     def test_pip_redirection_is_removed(self):
         with patch.dict(os.environ, {"PIP_TARGET": "/source", "PYTHONPATH": "/source",
                                      "PIP_PREFIX": "/source", "PYTHONHOME": "/source",
+                                     "PIP_INDEX_URL": "https://old-index.invalid/simple/",
+                                     "PIP_EXTRA_INDEX_URL": "https://public-index.invalid/simple/",
+                                     "PIP_FIND_LINKS": "https://old-wheels.invalid/",
+                                     "PIP_TRUSTED_HOST": "old-index.invalid",
+                                     "PIP_CONFIG_FILE": "/source/pip.conf", "PIP_NO_INDEX": "1",
                                      "JAVA_HOME": "/other/java", "MAX_JOBS": "4"}):
             env = setup.isolated_env()
-        for name in ("PIP_TARGET", "PIP_PREFIX", "PYTHONPATH", "PYTHONHOME", "JAVA_HOME"):
+        for name in ("PIP_TARGET", "PIP_PREFIX", "PYTHONPATH", "PYTHONHOME", "JAVA_HOME",
+                     "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_TRUSTED_HOST", "PIP_NO_INDEX"):
             self.assertNotIn(name, env)
+        self.assertEqual(env["PIP_CONFIG_FILE"], os.devnull)
         self.assertEqual(env["MAX_JOBS"], "4")
         self.assertEqual(env["PYTHONNOUSERSITE"], "1")
 
@@ -141,9 +153,32 @@ class InstallationIsolationTests(unittest.TestCase):
             self.assertIn("/CONDA_ENVS/denoise-webshop", output.getvalue())
             self.assertNotIn("setup.sh", output.getvalue())
             self.assertIn("--override-channels", output.getvalue())
-            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main", output.getvalue())
-            self.assertIn("https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge", output.getvalue())
-            self.assertIn("--index-url https://pypi.tuna.tsinghua.edu.cn/simple", output.getvalue())
+            self.assertIn("http://nexus.sii.shaipower.online/repository/anaconda/pkgs/main", output.getvalue())
+            self.assertIn("http://nexus.sii.shaipower.online/repository/anaconda/cloud/conda-forge", output.getvalue())
+            self.assertIn("--index-url http://nexus.sii.shaipower.online/repository/pypi_proxy/simple/", output.getvalue())
+            self.assertIn("--trusted-host nexus.sii.shaipower.online", output.getvalue())
+
+    def test_resume_can_select_other_internal_pip_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            records = target / setup.MARKER
+            records.mkdir()
+            marker = records / "setup.json"
+            marker.write_text(json.dumps({"benchmark": "scienceworld", "mode": "fresh", "source_prefix": None,
+                                          "mirror": "tuna", "pip_index_url": "https://pypi.tuna.tsinghua.edu.cn/simple",
+                                          "status": "failed"}))
+            endpoint = "http://nexus.sii.shaipower.online/repository/pypi/simple/"
+            commands = []
+            self.invoke(["--benchmark", "scienceworld", "--resume", "--pip-index-url", endpoint],
+                        [target], commands.append)
+            for command in commands:
+                self.assertNotIn("tuna.tsinghua.edu.cn", " ".join(map(str, command)))
+                if "pip" in command and "install" in command:
+                    self.assertEqual(command[command.index("--index-url") + 1], endpoint)
+                    self.assertEqual(command[command.index("--trusted-host") + 1], "nexus.sii.shaipower.online")
+            saved = json.loads(marker.read_text())
+            self.assertEqual(saved["mirror"], "internal")
+            self.assertEqual(saved["pip_index_url"], endpoint)
 
     def test_legacy_setup_stops_before_running_any_installer(self):
         env = dict(os.environ)
