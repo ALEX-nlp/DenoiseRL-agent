@@ -46,10 +46,11 @@ class TaskRunner:
 
         denoise_cfg = config.env.get("denoise", {})
         online_cfg = denoise_cfg.get("online", {})
-        if not bool(denoise_cfg.get("enable", False)) or str(denoise_cfg.get("mode", "")).lower() != "online":
-            raise ValueError("main_online_denoise requires env.denoise.enable=True and env.denoise.mode=online.")
+        denoise_enabled = bool(denoise_cfg.get("enable", False))
+        if str(denoise_cfg.get("mode", "")).lower() != "online":
+            raise ValueError("main_online_denoise requires env.denoise.mode=online.")
         denoise_model_path = online_cfg.get("model_path", None)
-        if denoise_model_path is None or str(denoise_model_path).strip() == "":
+        if denoise_enabled and (denoise_model_path is None or str(denoise_model_path).strip() == ""):
             raise ValueError("Set env.denoise.online.model_path (or DENOISE_MODEL_PATH in the launch script).")
 
         solver_local_path = copy_to_local(
@@ -59,7 +60,7 @@ class TaskRunner:
         denoise_local_path = copy_to_local(
             denoise_model_path,
             use_shm=config.actor_rollout_ref.model.get("use_shm", False),
-        )
+        ) if denoise_enabled else None
         with open_dict(config):
             config.actor_rollout_ref.model.path = solver_local_path
             config.env.denoise.online.model_path = denoise_local_path
@@ -69,7 +70,7 @@ class TaskRunner:
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(solver_local_path, trust_remote_code=trust_remote_code)
         processor = hf_processor(solver_local_path, trust_remote_code=trust_remote_code, use_fast=True)
-        denoise_tokenizer = hf_tokenizer(denoise_local_path, trust_remote_code=trust_remote_code)
+        denoise_tokenizer = hf_tokenizer(denoise_local_path, trust_remote_code=trust_remote_code) if denoise_enabled else None
 
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
             from verl.single_controller.ray import RayWorkerGroup
@@ -139,16 +140,20 @@ class TaskRunner:
             denoise_processor=None,
         )
         if hasattr(traj_collector, "configure_v2"):
-            alfworld_envs = getattr(envs, "envs", None)
-            alfworld_game_files = getattr(alfworld_envs, "game_files", ())
-            alfworld_gamefile_task_types = getattr(
-                alfworld_envs,
-                "game_file_task_types",
+            task_envs = getattr(envs, "envs", None)
+            is_task_suite = hasattr(task_envs, "task_ids")
+            if is_task_suite:
+                traj_collector.v2_environment_fingerprint = task_envs.task_pool_fingerprint
+            task_ids = getattr(task_envs, "task_ids" if is_task_suite else "game_files", ())
+            task_types = getattr(
+                task_envs,
+                "task_types" if is_task_suite else "game_file_task_types",
                 {},
             )
             traj_collector.configure_v2(
-                alfworld_game_files,
-                alfworld_gamefile_task_types,
+                task_ids,
+                task_types,
+                reset_key="task_id" if is_task_suite else "gamefile",
             )
 
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)

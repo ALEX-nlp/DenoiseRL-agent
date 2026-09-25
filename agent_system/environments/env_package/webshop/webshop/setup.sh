@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# This legacy installer mutates the active environment and pins old training
+# packages. The task-suite installer always targets a separate Conda prefix.
+if [ "${WEBSHOP_ALLOW_LEGACY_INSTALL:-0}" != "1" ]; then
+  echo "Legacy WebShop setup is disabled by default to protect the active environment."
+  echo "From the repository root, run:"
+  echo "python -m recipe.denoise_v2.task_suite.setup_environment --benchmark webshop --mode fresh"
+  echo "See recipe/denoise_v2/task_suite/ENVIRONMENTS.md for cloning and data-only setup."
+  exit 1
+fi
+
 # Displays information on how to use script
 helpFunction()
 {
@@ -56,7 +66,11 @@ python -m spacy download en_core_web_sm
 # Build search engine index
 cd search_engine
 mkdir -p resources resources_100 resources_1k resources_100k
-python convert_product_file_format.py # convert items.json => required doc format
+if [ "$data" == "all" ]; then
+  python convert_product_file_format.py --file-path ../data/items_shuffle.json --attr-path ../data/items_ins_v2.json
+else
+  python convert_product_file_format.py --file-path ../data/items_shuffle_1000.json --attr-path ../data/items_ins_v2_1000.json
+fi
 mkdir -p indexes
 ./run_indexing.sh
 cd ..

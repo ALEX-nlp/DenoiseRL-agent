@@ -1,5 +1,8 @@
 # ALFWorld DenoiseRL v2
 
+WebShop and ScienceWorld now have matched GRPO baseline and DenoiseRL v2
+recipes. See [task-suite setup, recommended parameters, training and evaluation](task_suite/README.md).
+
 This recipe is the agent counterpart of the mathematical `recipe/denoise_v2` algorithm. It traverses a shuffled pool of concrete ALFWorld gamefiles without replacement inside each pool epoch and maintains one dynamic noise state per ALFWorld task type.
 
 ## Complete seen/unseen evaluation

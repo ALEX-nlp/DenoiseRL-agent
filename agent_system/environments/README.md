@@ -30,38 +30,20 @@ alfworld-play-tw
 ---
 
 ## 2. WebShop
-WebShop requires Python <=3.10, so begin by creating a new `verl-agent-webshop` environment
+Use a dedicated Python 3.10 environment for the text simulator and training stack.
+From the repository root on a Linux GPU server:
+
 ```bash
-conda create -n verl-agent-webshop python==3.10 -y
-conda activate verl-agent-webshop
+python -m recipe.denoise_v2.task_suite.setup_environment --benchmark webshop --mode fresh
+conda activate denoise-webshop
+python -m recipe.denoise_v2.task_suite.prepare_webshop_assets --download --build-index
 ```
 
-Install WebShop
-```bash
-cd ./agent_system/environments/env_package/webshop/webshop
-./setup.sh -d all
-```
-
-Note: If you encounter issues with gdown, you may need visit `https://drive.google.com/`, get your Google Drive cookie, and paste it into `.cache/gdown/cookies.txt`.
-Or you may need to manually download the files.
-
-
-Verify that WebShop was installed correctly by running:
-```bash
-python run_web_agent_text_env.py
-```
-
-After WebShop is installed, return to the root directory of the repository and install the verl package in `verl-agent`:
-```bash
-cd repo_root/
-pip3 install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-pip3 install flash-attn --no-build-isolation
-pip3 install -e .
-pip3 install vllm==0.8.2
-# spacy 3.7.2 requires typer<0.10.0,>=0.3.0, but you have typer 0.15.2 which is incompatible.
-# weasel 0.3.4 requires typer<0.10.0,>=0.3.0, but you have typer 0.15.2 which is incompatible.
-```
-The warnings can be safely ignored.
+The old `webshop/setup.sh` changes the active environment and is disabled by default.
+See [isolated environments](../../recipe/denoise_v2/task_suite/ENVIRONMENTS.md) for
+cloning a healthy existing environment, ScienceWorld installation, task manifests,
+and simulator / training checks. Both GRPO and DenoiseRL use the same environment
+within each benchmark. Resolve dependency conflicts before training.
 
 ---
 ## 3. Sokoban

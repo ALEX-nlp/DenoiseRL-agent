@@ -13,6 +13,10 @@
 
 The maintained implementation is **[`recipe/denoise_v2`](./recipe/denoise_v2)**. Use this recipe for training and evaluation.
 
+WebShop and ScienceWorld adapters, matched GRPO baselines, and recommended
+8×80GB launch profiles are documented in
+[`recipe/denoise_v2/task_suite`](./recipe/denoise_v2/task_suite/README.md).
+
 ## Method
 
 For an ALFWorld gamefile, a weak policy first produces a failed interaction trajectory. DenoiseRL-Agent truncates that trajectory into an action prefix `z`, restores the environment state reached by the prefix, and asks the trainable policy to continue:

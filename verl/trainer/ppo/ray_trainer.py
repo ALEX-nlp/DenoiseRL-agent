@@ -724,6 +724,7 @@ class RayPPOTrainer:
         success_rate_dict = {}
         processed_samples = 0
         validation_gamefiles = ordered_validation_gamefiles(val_envs)
+        task_suite_validation = hasattr(getattr(val_envs, "envs", None), "task_ids")
         sample_limit = len(validation_gamefiles) or self._validation_sample_limit(val_envs)
         max_env_batch_size = self._validation_env_batch_size(val_envs)
         val_n = int(self.config.actor_rollout_ref.rollout.val_kwargs.n)
@@ -794,6 +795,7 @@ class RayPPOTrainer:
                         start=validation_batch_start,
                         count=remaining_batch,
                         repeats=val_n,
+                        reset_key="task_id" if task_suite_validation else "gamefile",
                     )
                     test_gen_batch.non_tensor_batch["env_kwargs"] = np.asarray(
                         validation_env_kwargs,
@@ -864,9 +866,19 @@ class RayPPOTrainer:
                             "ALFWorld validation returned the wrong number of trajectories: "
                             f"expected={len(validation_env_kwargs)}, actual={batch_traj_count}."
                         )
-                    observed_validation_gamefiles.extend(
-                        item["validation_gamefile"] for item in validation_env_kwargs
-                    )
+                    if task_suite_validation:
+                        actual_by_uid = {}
+                        for uid, task_id in zip(test_batch.non_tensor_batch["traj_uid"], test_batch.non_tensor_batch["task_id"]):
+                            if uid in actual_by_uid and actual_by_uid[uid] != task_id:
+                                raise RuntimeError("Validation trajectory changed task identity")
+                            actual_by_uid[uid] = task_id
+                        actual = [actual_by_uid[uid] for uid in ordered_batch_traj_uids]
+                        expected = [item["validation_gamefile"] for item in validation_env_kwargs]
+                        if actual != expected:
+                            raise RuntimeError("Validation tasks differ from requested tasks")
+                        observed_validation_gamefiles.extend(actual)
+                    else:
+                        observed_validation_gamefiles.extend(item["validation_gamefile"] for item in validation_env_kwargs)
                 # success rate
                 for k in test_batch.non_tensor_batch.keys():
                     if 'success_rate' in k:
@@ -895,9 +907,11 @@ class RayPPOTrainer:
                 observed_validation_gamefiles,
                 repeats=val_n,
             )
+            if task_suite_validation:
+                coverage_metrics = {key.replace("gamefile", "task"): value for key, value in coverage_metrics.items()}
             split_label = split_name or "alfworld"
             print(
-                f"[validation] {split_label}: exhaustive ALFWorld coverage verified; "
+                f"[validation] {split_label}: exhaustive task coverage verified; "
                 f"unique={len(validation_gamefiles)}, episodes={len(observed_validation_gamefiles)}."
             )
 
@@ -909,7 +923,7 @@ class RayPPOTrainer:
             dump_path = os.path.join(val_data_dir, split_name) if split_name else val_data_dir
             validation_extra_infos = {}
             if validation_gamefiles:
-                validation_extra_infos["gamefile"] = observed_validation_gamefiles
+                validation_extra_infos["task_id" if task_suite_validation else "gamefile"] = observed_validation_gamefiles
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,

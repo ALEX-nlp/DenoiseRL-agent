@@ -1,12 +1,19 @@
+import argparse
 import sys
 import json
+from pathlib import Path
 from tqdm import tqdm
 sys.path.insert(0, '../')
 
 from web_agent_site.utils import DEFAULT_FILE_PATH, DEFAULT_ATTR_PATH
 from web_agent_site.engine.engine import load_products
 
-all_products, *_ = load_products(filepath=DEFAULT_FILE_PATH, attrpath=DEFAULT_ATTR_PATH)
+parser = argparse.ArgumentParser(description="Convert WebShop products into search-index documents.")
+parser.add_argument('--file-path', default=DEFAULT_FILE_PATH)
+parser.add_argument('--attr-path', default=DEFAULT_ATTR_PATH)
+parser.add_argument('--output-root', type=Path, default=Path('.'))
+args = parser.parse_args()
+all_products, *_ = load_products(filepath=args.file_path, attrpath=args.attr_path)
 
 
 docs = []
@@ -30,18 +37,10 @@ for p in tqdm(all_products, total=len(all_products)):
     docs.append(doc)
 
 
-with open('./resources_100/documents.jsonl', 'w+') as f:
-    for doc in docs[:100]:
-        f.write(json.dumps(doc) + '\n')
-
-with open('./resources/documents.jsonl', 'w+') as f:
-    for doc in docs:
-        f.write(json.dumps(doc) + '\n')
-
-with open('./resources_1k/documents.jsonl', 'w+') as f:
-    for doc in docs[:1000]:
-        f.write(json.dumps(doc) + '\n')
-
-with open('./resources_100k/documents.jsonl', 'w+') as f:
-    for doc in docs[:100000]:
-        f.write(json.dumps(doc) + '\n')
+for folder, limit in [('resources_100', 100), ('resources', None),
+                      ('resources_1k', 1000), ('resources_100k', 100000)]:
+    output = args.output_root / folder
+    output.mkdir(parents=True, exist_ok=True)
+    with (output / 'documents.jsonl').open('w') as f:
+        for doc in docs[:limit]:
+            f.write(json.dumps(doc) + '\n')

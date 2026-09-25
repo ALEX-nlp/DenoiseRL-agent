@@ -1,0 +1,26 @@
+# Fresh Linux x86_64 / Python 3.10 profile. Not an exhaustive transitive lock.
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+vllm==0.8.5.post1
+xformers==0.0.29.post2
+transformers==4.51.3
+tokenizers==0.21.1
+peft==0.15.2
+ray==2.43.0
+tensordict==0.8.3
+torchdata==0.11.0
+numpy==1.26.4
+pandas==2.2.3
+datasets==4.0.0
+pyarrow==19.0.1
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
+mistral-common==1.5.4
+opentelemetry-api==1.26.0
+opentelemetry-sdk==1.26.0
+opentelemetry-exporter-otlp==1.26.0
+opentelemetry-exporter-otlp-proto-grpc==1.26.0
+opentelemetry-exporter-otlp-proto-http==1.26.0
+opentelemetry-semantic-conventions==0.47b0
+flash-attn==2.7.4.post1

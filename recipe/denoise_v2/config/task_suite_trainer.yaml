@@ -1,0 +1,25 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - denoise_v2_base
+  - _self_
+
+data:
+  train_batch_size: 16
+  shuffle: False
+  dataloader_num_workers: 0
+
+env:
+  task_suite:
+    enabled: True
+    benchmark: webshop
+    manifest_path: null
+    eval_split: dev
+    reward_mode: score
+  # Inherit the ALFWorld v2 controller unchanged: rho=[0, 0.5],
+  # initial_rho=0, target_accuracy=0.75, alpha=0.2.
+
+trainer:
+  project_name: denoise_v2_task_suite

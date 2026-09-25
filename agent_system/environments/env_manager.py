@@ -708,6 +708,9 @@ def make_envs(config):
     """
     Create enviroments 
     """ 
+    if config.env.get("task_suite", {}).get("enabled", False):
+        from agent_system.environments.env_package.task_suite.manager import make_task_envs
+        return make_task_envs(config)
     # check if config.env.rollout.n is an integer
     if not isinstance(config.env.rollout.n, int):
         raise ValueError("config.env.rollout.n should be an integer")

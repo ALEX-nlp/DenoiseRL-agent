@@ -19,7 +19,7 @@ from recipe.denoise_v2.trajectory_prefix import PrefixPool
 
 
 class DenoiseTrajectoryCollector(TrajectoryCollector):
-    """Mixes clean ALFWorld rollouts with denoised sub-rollouts."""
+    """Collect clean or prefix-conditioned rollouts from replayable task environments."""
 
     @staticmethod
     def _as_bool(value) -> bool:
@@ -102,21 +102,24 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
             resolved[gamefile] = str(task_type)
         return {gamefile: resolved[gamefile] for gamefile in game_files}
 
-    def configure_v2(self, game_files, gamefile_task_types=None) -> None:
-        """Bind v2 to the complete ALFWorld gamefile pool and task metadata."""
+    def configure_v2(self, game_files, gamefile_task_types=None, reset_key="gamefile") -> None:
+        """Bind concrete task IDs/types; gamefile resets remain the ALFWorld default."""
         if not self.v2_enabled:
             return
-        if not self.enabled or self.mode != "online":
-            raise ValueError("DenoiseRL v2 requires env.denoise.enable=True and mode='online'.")
+        self.v2_reset_key = reset_key
+        if self.mode != "online":
+            raise ValueError("DenoiseRL v2 requires mode='online'.")
+        if not self.enabled and any(float(self.v2_cfg.get(key, 0)) != 0 for key in ("initial_rho", "min_rho", "max_rho")):
+            raise ValueError("Clean GRPO curriculum requires all rho bounds to be zero.")
         if self.online_prefix_strategy != "full_then_ratio":
             raise ValueError("DenoiseRL v2 requires prefix_strategy='full_then_ratio'.")
 
         total_n = int(self.config.env.rollout.n)
-        if self.main_rollout_n != 0 or self.sub_rollout_k != 16 or total_n != 16:
+        expected_layout = (0, 16) if self.enabled else (16, 0)
+        if (self.main_rollout_n, self.sub_rollout_k) != expected_layout or total_n != 16:
             raise ValueError(
-                "DenoiseRL v2 requires zero clean slots and exactly 16 dynamic-noise "
-                "rollouts per active gamefile: main_rollout_n=0, "
-                "sub_rollout_k=16, env.rollout.n=16."
+                "Task-pool training requires exactly 16 rollouts per task: "
+                f"expected (main_rollout_n, sub_rollout_k)={expected_layout}, env.rollout.n=16."
             )
         if self.online_prefix_candidates_per_group != 1:
             raise ValueError(
@@ -131,7 +134,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
         ordered_game_files = tuple(sorted(str(path) for path in (game_files or ())))
         if not ordered_game_files:
             raise ValueError(
-                "DenoiseRL v2 requires the AlfredTWEnv training gamefile pool; "
+                "DenoiseRL v2 requires a concrete training task pool; "
                 "the environment exposed no gamefiles."
             )
         if len(set(ordered_game_files)) != len(ordered_game_files):
@@ -183,11 +186,15 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
             raise RuntimeError("DenoiseRL v2 curriculum has not been configured.")
         state = self.v2_curriculum.state_dict()
         state["online_prefix_rng_state"] = self.online_prefix_rng.bit_generator.state
+        if hasattr(self, "v2_environment_fingerprint"):
+            state["environment_fingerprint"] = self.v2_environment_fingerprint
         return state
 
     def load_v2_state_dict(self, state: dict) -> None:
         if not self.v2_enabled or self.v2_curriculum is None:
             raise RuntimeError("DenoiseRL v2 curriculum has not been configured.")
+        if hasattr(self, "v2_environment_fingerprint") and state.get("environment_fingerprint") != self.v2_environment_fingerprint:
+            raise ValueError("Task data, reward mode or step budget differs from the curriculum checkpoint.")
         self.v2_curriculum.load_state_dict(state)
         rng_state = state.get("online_prefix_rng_state")
         if rng_state is not None:
@@ -285,7 +292,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
                 task_type = self.v2_curriculum.task_type_for_problem(gamefile)
                 group_metadata = {
                     # Pin all 16 workers in this group to the active gamefile.
-                    "gamefile": gamefile,
+                    getattr(self, "v2_reset_key", "gamefile"): gamefile,
                     "denoise_v2_problem_id": gamefile,
                     "denoise_v2_task_type": task_type,
                     "denoise_v2_rho": self.v2_curriculum.rho_for_problem(gamefile),
@@ -303,7 +310,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
             for _sub_idx in range(self.sub_rollout_k):
                 env_kwargs.append(
                     {
-                        "denoise_is_sub": True,
+                        "denoise_is_sub": self.enabled,
                         "denoise_prefix_len": 0,
                         "denoise_prefix_source": source,
                         **group_metadata,
@@ -427,7 +434,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
 
     def _current_obs_from_envs(self, envs, prefix_lens: np.ndarray) -> dict:
         if not hasattr(envs, "build_mixed_text_obs_after_prefix"):
-            raise NotImplementedError("Online DenoiseRL currently requires AlfWorldEnvironmentManager.")
+            raise NotImplementedError("Online DenoiseRL requires a replayable text environment manager.")
         text_obs = envs.build_mixed_text_obs_after_prefix(prefix_lens.tolist())
         anchor = list(envs.pre_text_obs)
         return {"text": text_obs, "image": None, "anchor": anchor}
@@ -772,7 +779,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
                 source="online_full_then_ratio",
             )
         if not hasattr(envs, "reset_selected_with_prefixes"):
-            raise NotImplementedError("full_then_ratio online DenoiseRL requires AlfWorldEnvironmentManager.")
+            raise NotImplementedError("full_then_ratio requires a replayable text environment manager.")
 
         group_candidate_indices = []
         candidate_indices = []
@@ -941,7 +948,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
             reset_kwargs = np.array([{} for _ in range(len(gen_batch.batch))], dtype=object)
         obs, infos = envs.reset(kwargs=reset_kwargs)
         denoise_rollout_metrics = {}
-        if self.enabled:
+        if self.enabled or self.v2_enabled:
             denoise_rollout_metrics = self._init_denoise_rollout_metrics(
                 batch_size=batch_size,
                 reset_kwargs=reset_kwargs,
@@ -1002,6 +1009,8 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
             batch = batch.union(batch_output)
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             next_obs, rewards, dones, infos = envs.step(text_actions)
+            if infos and "task_id" in infos[0]:
+                batch.non_tensor_batch["task_id"] = np.asarray([info["task_id"] for info in infos], dtype=object)
 
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
@@ -1038,7 +1047,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
                     episode_rewards=episode_rewards,
                     episode_lengths=episode_lengths,
                     )
-        if self.enabled and "success_rate" in success:
+        if (self.enabled or self.v2_enabled) and "success_rate" in success:
             episode_success = success["success_rate"]
             for i in range(batch_size):
                 for data in total_batch_list[i]:
@@ -1120,7 +1129,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
     ) -> DataProto:
         if is_train:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
-            if self.enabled:
+            if self.enabled or self.v2_enabled:
                 if self.mode == "prefix_pool" and not self.prefix_pool:
                     raise ValueError(
                         "env.denoise.enable=True but no prefixes were loaded. "

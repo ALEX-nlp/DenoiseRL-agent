@@ -39,7 +39,7 @@ def collapse_trajectory_rows(
 def ordered_validation_gamefiles(val_envs) -> tuple[str, ...]:
     """Return the complete validation pool in a deterministic order."""
     envs = getattr(val_envs, "envs", None)
-    raw_gamefiles = getattr(envs, "game_files", ())
+    raw_gamefiles = getattr(envs, "task_ids", getattr(envs, "game_files", ()))
     if not raw_gamefiles:
         return ()
 
@@ -62,6 +62,7 @@ def build_gamefile_reset_kwargs(
     start: int,
     count: int,
     repeats: int,
+    reset_key: str = "gamefile",
 ) -> tuple[dict[str, str], ...]:
     """Build reset kwargs matching DataProto.repeat(..., interleave=True)."""
     if start < 0 or count < 0:
@@ -78,7 +79,7 @@ def build_gamefile_reset_kwargs(
 
     return tuple(
         {
-            "gamefile": gamefile,
+            reset_key: gamefile,
             "validation_gamefile": gamefile,
         }
         for gamefile in selected

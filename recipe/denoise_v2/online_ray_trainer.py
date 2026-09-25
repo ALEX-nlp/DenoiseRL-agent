@@ -199,6 +199,9 @@ class OnlineDenoisePPOTrainer(RayPPOTrainer):
         return all_wg
 
     def init_workers(self):
+        if not self.config.env.denoise.enable:
+            # Clean baseline/evaluation: no weak model or tokenizer is loaded.
+            return super().init_workers()
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 

@@ -1,0 +1,23 @@
+# Used only for fresh environments. Clone mode preserves the source GPU stack.
+vllm==0.8.5.post1
+transformers==4.51.3
+peft==0.15.2
+ray[default]==2.43.0
+tensordict==0.8.3
+torchdata==0.11.0
+numpy==1.26.4
+pandas==2.2.3
+datasets==4.0.0
+pyarrow==19.0.1
+accelerate>=0.34,<2
+codetiming
+dill
+hydra-core==1.3.2
+pybind11
+pylatexenc
+wandb>=0.18,<1
+packaging
+qwen-vl-utils[decord]
+ninja
+wheel
+setuptools>=75,<81
