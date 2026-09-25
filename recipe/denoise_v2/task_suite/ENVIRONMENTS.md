@@ -39,7 +39,7 @@ python -m recipe.denoise_v2.task_suite.setup_environment \
 
 ### 推荐：从零创建
 
-如果 `molu` 仍有此前 `pip check` 中的冲突，采用此方式。Conda / pip 会复用已有下载缓存，但新环境不会继承 `molu` 的 Python 包。
+如果希望从独立的依赖清单开始，可以采用此方式。Conda / pip 会复用已有下载缓存，但新环境不会继承 `molu` 的 Python 包。
 
 ```bash
 python -m recipe.denoise_v2.task_suite.setup_environment --benchmark webshop --mode fresh
@@ -63,9 +63,9 @@ python -m recipe.denoise_v2.task_suite.setup_environment --benchmark scienceworl
 
 默认 PyTorch 2.6 Linux wheel 使用 CUDA 12.4 运行库；服务器需要兼容的 NVIDIA 驱动。FlashAttention 安装可能需要下载匹配的预编译 wheel；若回退到源码构建，则需要匹配的 CUDA Toolkit / `nvcc` 和 C++ 编译器。可设置 `MAX_JOBS=4` 限制编译并行数。安装器不会安装系统驱动或 CUDA Toolkit。
 
-### 快速方式：从健康的 molu 克隆
+### 快速方式：从 molu 克隆
 
-如果 `molu` 已恢复且训练正常，可以复用训练栈，省去重新安装 Torch / vLLM / FlashAttention：
+克隆可以复用 `molu` 的训练栈，省去重新安装 Torch / vLLM / FlashAttention。`pip check` 的依赖冲突或平台标签提示不会阻止克隆：
 
 ```bash
 python -m recipe.denoise_v2.task_suite.setup_environment \
@@ -74,7 +74,7 @@ python -m recipe.denoise_v2.task_suite.setup_environment \
   --benchmark scienceworld --mode clone --source-env molu
 ```
 
-克隆前会只读运行源环境的 `pip check`；有冲突就停止，建议改用 fresh。源环境必须是 Python 3.10，且已安装脚本要求的训练核心包。克隆使用 `conda create --clone ... --copy`，随后所有安装都显式指定新环境的 prefix。Torch、vLLM、FlashAttention、Transformers、PEFT、Ray 等以及已安装的 NVIDIA 包会记录为精确约束，补装模拟器时不能改动这些版本。其他模拟器依赖可在新环境中调整；冲突不会通过自动重装源环境来解决。
+克隆前会只读运行源环境的 `pip check`；非零退出码仅打印警告，随后继续克隆。源环境必须是 Python 3.10，且已安装脚本要求的训练核心包。克隆使用 `conda create --clone ... --copy`，随后所有安装都显式指定新环境的 prefix。Torch、vLLM、FlashAttention、Transformers、PEFT、Ray 等以及已安装的 NVIDIA 包会记录为精确约束，补装模拟器时不能改动这些版本。其他模拟器依赖可在新环境中调整；源环境不因这些检查而被修改。不要在外层 `set -e` 脚本中另加一条独立的 `python -m pip check`，否则仍会在进入安装器之前停止；若单独查看冲突，可用 `python -m pip check || true`。
 
 `--name my-webshop` 可自定义新环境名；不允许 `base`、`molu` 或源环境名。已有环境默认拒绝覆盖。
 
@@ -96,13 +96,13 @@ python -m recipe.denoise_v2.task_suite.setup_environment --benchmark scienceworl
 
 若提示 `installer record is missing`，说明目标环境缺少 `.denoise-task-suite/setup.json`，仅加 `--resume` 不能接管它。可能是在 Conda 创建结束、脚本写入记录之前中断，也可能是手动创建的环境。先检查目标环境与 Conda 安装历史，或通过 `--name` 使用另一个新环境；不要手工伪造安装记录。`--mode clone` 创建的环境应继续使用 clone 参数。
 
-安装完成前会执行 `pip check`、训练入口和核心包导入、Java 检查；WebShop 还检查文本模拟器及 spaCy 模型，ScienceWorld 会启动 JVM 并读取任务类型。记录位于新环境的 `$CONDA_PREFIX/.denoise-task-suite/`：
+安装完成前会执行 `pip check`、训练入口和核心包导入、Java 检查；WebShop 还检查文本模拟器及 spaCy 模型，ScienceWorld 会启动 JVM 并读取任务类型。**安装后的 `pip check` 也只报告警告，不会阻止完成安装**；实际安装失败、核心包导入失败、Java/模拟器错误和核心版本约束变化仍会报错并停止。记录位于新环境的 `$CONDA_PREFIX/.denoise-task-suite/`：
 
 - `setup.json`：创建方式、源环境、本次镜像选择、pip 索引和安装状态。
-- `pip-freeze.txt`、`check.json`：实际版本与依赖/导入检查结果。
+- `pip-freeze.txt`、`check.json`：实际版本与依赖/导入检查结果；`pip_check` 保存完整输出，`pip_check_returncode` 保存退出码，`warnings` 记录非阻断提示，`errors` 记录阻断错误。
 - `core-constraints.txt`：clone 模式的原始训练核心约束，失败重试时不会重新生成以掩盖版本变化。
 
-安装检查不等于 GPU 训练验证；继续执行下面的原生模拟器 smoke test 和短训练。
+安装完成状态 `dependencies_checked` 不代表 `pip check` 零冲突，也不表示已自动修复全部冲突。安装检查不等于 GPU 训练验证；继续执行下面的原生模拟器 smoke test 和短训练。
 
 ## 2. 准备数据与任务清单
 

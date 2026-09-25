@@ -70,16 +70,26 @@ class InstallationIsolationTests(unittest.TestCase):
                              "dependencies_checked")
             self.assertEqual(list(source.iterdir()), [])
 
-    def test_broken_source_aborts_before_cloning(self):
-        commands = []
-        def fail(command):
-            commands.append(command)
-            raise subprocess.CalledProcessError(1, command)
-        with self.assertRaises(subprocess.CalledProcessError):
-            self.invoke(["--benchmark", "scienceworld", "--mode", "clone"],
-                        [Path("/envs/molu"), None], fail)
-        self.assertEqual(len(commands), 1)
-        self.assertEqual(commands[0][-3:], ["-m", "pip", "check"])
+    def test_pip_check_conflicts_do_not_block_cloning(self):
+        for benchmark in ("webshop", "scienceworld"):
+            with self.subTest(benchmark=benchmark), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "molu"
+                target = Path(directory) / f"denoise-{benchmark}"
+                source.mkdir()
+                target.mkdir()  # Simulate Conda creating this path.
+                commands = []
+                def run(command):
+                    commands.append(command)
+                    if command[-3:] == ["-m", "pip", "check"]:
+                        raise subprocess.CalledProcessError(1, command)
+                self.invoke(["--benchmark", benchmark, "--mode", "clone"], [source, None, target], run)
+                self.assertEqual(commands[0][-3:], ["-m", "pip", "check"])
+                self.assertIn("--clone", commands[1])
+                self.assertTrue(any("install" in c for c in commands[2:]))
+                self.assertIn("--report-dir", commands[-1])
+                self.assertEqual(json.loads((target / setup.MARKER / "setup.json").read_text())["status"],
+                                 "dependencies_checked")
+                self.assertEqual(list(source.iterdir()), [])
 
     def test_failed_install_can_resume_only_with_matching_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -190,6 +200,56 @@ class InstallationIsolationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("disabled by default", result.stdout)
         self.assertEqual(result.stderr, "")
+
+
+class EnvironmentCheckTests(unittest.TestCase):
+    def test_pip_findings_are_recorded_but_import_errors_still_block(self):
+        # Exercise the full post-install checker without a GPU or native JVM.
+        # A clean check, advisory conflicts and a genuine import failure must
+        # produce different reports/exit behavior.
+        for pip_code, import_failure in ((0, False), (1, False), (1, True)):
+            with self.subTest(pip_code=pip_code, import_failure=import_failure), \
+                 tempfile.TemporaryDirectory() as directory:
+                torch = types.ModuleType("torch")
+                torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+                torch.version = types.SimpleNamespace(cuda="12.4")
+                scienceworld = types.ModuleType("scienceworld")
+                scienceworld.ScienceWorldEnv = lambda **kwargs: types.SimpleNamespace(
+                    get_task_names=lambda: ["boil"], close=lambda: None)
+                pip_stdout = "decord 0.6.0 is not supported on this platform\n" if pip_code else "No broken requirements found.\n"
+                pip_stderr = "dependency diagnostic\n" if pip_code else ""
+                def run(command, **kwargs):
+                    if command[-3:] == ["-m", "pip", "check"]:
+                        self.assertFalse(kwargs["check"])
+                        return subprocess.CompletedProcess(command, pip_code, pip_stdout, pip_stderr)
+                    if "freeze" in command:
+                        return subprocess.CompletedProcess(command, 0, "torch==2.6.0\n", "")
+                    if command == ["java", "-version"]:
+                        return subprocess.CompletedProcess(command, 0, "", "openjdk version 11")
+                    self.fail(f"Unexpected command: {command}")
+                def import_module(name):
+                    if import_failure and name == "vllm":
+                        raise ImportError("simulated native import failure")
+                    return types.SimpleNamespace()
+                with patch.object(sys, "path", list(sys.path)), \
+                     patch.dict(sys.modules, {"torch": torch, "scienceworld": scienceworld}), \
+                     patch.object(checks.platform, "platform", return_value="Linux-test"), \
+                     patch.object(checks, "installed_core", return_value={}), \
+                     patch.object(checks.subprocess, "run", side_effect=run), \
+                     patch.object(checks.importlib, "import_module", side_effect=import_module), \
+                     redirect_stdout(io.StringIO()):
+                    if import_failure:
+                        with self.assertRaisesRegex(RuntimeError, "Environment checks failed"):
+                            checks.check_environment("scienceworld", Path(directory))
+                    else:
+                        checks.check_environment("scienceworld", Path(directory))
+                result = json.loads((Path(directory) / "check.json").read_text())
+                self.assertEqual(result["pip_check"], pip_stdout + pip_stderr)
+                self.assertEqual(result["pip_check_returncode"], pip_code)
+                self.assertEqual(bool(result["warnings"]), bool(pip_code))
+                self.assertEqual(bool(result["errors"]), import_failure)
+                if import_failure:
+                    self.assertEqual(result["errors"], ["vllm: simulated native import failure"])
 
 
 class AssetRecoveryTests(unittest.TestCase):

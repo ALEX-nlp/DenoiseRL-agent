@@ -53,13 +53,17 @@ def check_environment(benchmark, report_dir, constraints=None):
     sys.path.insert(0, str(root))
     report_dir.mkdir(parents=True, exist_ok=True)
     result = {"python": sys.version, "prefix": sys.prefix, "platform": platform.platform(),
-              "benchmark": benchmark, "core": installed_core(), "errors": []}
+              "benchmark": benchmark, "core": installed_core(), "warnings": [], "errors": []}
     freeze = subprocess.run([sys.executable, "-m", "pip", "freeze", "--all"], capture_output=True, text=True, check=True)
     (report_dir / "pip-freeze.txt").write_text(freeze.stdout)
-    check = subprocess.run([sys.executable, "-m", "pip", "check"], capture_output=True, text=True)
+    check = subprocess.run([sys.executable, "-m", "pip", "check"], capture_output=True, text=True, check=False)
     result["pip_check"] = check.stdout + check.stderr
+    result["pip_check_returncode"] = check.returncode
     if check.returncode:
-        result["errors"].append("pip check failed (clones inherit unrelated source conflicts)")
+        result["warnings"].append(
+            f"pip check exited with status {check.returncode}; dependency/platform findings are advisory "
+            "and have not been fixed."
+        )
     modules = ["torch", "vllm", "flash_attn", "transformers", "peft", "ray", "tensordict",
                "torchdata.stateful_dataloader", "recipe.denoise_v2.main_online_denoise"]
     for module in modules:

@@ -175,9 +175,13 @@ def main():
         if args.resume:
             raise ValueError("Cannot resume: environment does not exist")
         if source:
-            # Read-only source check. A broken clone should not be mistaken for
-            # a clean environment; fresh mode is the recovery path.
-            run([conda, "run", "--no-capture-output", "--prefix", str(source), "python", "-m", "pip", "check"])
+            # Read-only, advisory source check. Conflicts are copied into the
+            # destination, where installation and runtime checks still run.
+            try:
+                run([conda, "run", "--no-capture-output", "--prefix", str(source), "python", "-m", "pip", "check"])
+            except subprocess.CalledProcessError as exc:
+                print(f"WARNING: source pip check exited with status {exc.returncode}; continuing with cloning. "
+                      "Dependency/platform findings are advisory and have not been fixed.", flush=True)
         run(creation_command(conda, name, args.mode, source, args.mirror))
         prefix = environment_prefix(conda, name)
         if prefix is None or prefix == source:
