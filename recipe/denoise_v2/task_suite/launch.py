@@ -2,14 +2,56 @@
 
 import argparse
 import json
+import netrc
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MODEL_ROOT = Path("/inspire/hdd/global_user/xucaijun-253108120121/Model")
+
+
+def has_wandb_credentials(env):
+    """Check common credential sources locally, without login/network or logging keys.
+
+    This checks presence, not server-side validity. Custom SDK authentication
+    sources can still opt into online mode explicitly via WANDB_MODE.
+    """
+    if env.get("WANDB_API_KEY", "").strip() or env.get("WANDB_IDENTITY_TOKEN_FILE", "").strip():
+        return True
+    host = urlparse(env.get("WANDB_BASE_URL", "https://api.wandb.ai")).hostname
+    if not host:
+        return False
+    paths = ([Path(env["NETRC"]).expanduser()] if env.get("NETRC")
+             else [Path.home() / ".netrc", Path.home() / "_netrc"])
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            auth = netrc.netrc(str(path)).authenticators(host)
+        except (OSError, netrc.NetrcParseError):
+            # Do not print parser errors: malformed netrc lines can contain keys.
+            return False
+        return bool(auth and auth[2])
+    return False
+
+
+def configure_wandb_mode(env, benchmark):
+    """Respect explicit modes; unconfigured batch jobs must remain runnable."""
+    if "WANDB_MODE" in env:
+        return
+    if benchmark == "scienceworld" and has_wandb_credentials(env):
+        env["WANDB_MODE"] = "online"
+    else:
+        env["WANDB_MODE"] = "offline"
+        if benchmark == "scienceworld":
+            print("[launch] No W&B credentials found in the environment or netrc; "
+                  "saving metrics offline. Live web charts require logging in on the job's runtime "
+                  "or providing WANDB_API_KEY through the job environment. "
+                  "Offline runs can be uploaded later with wandb sync.", flush=True)
 
 
 def resolve_checkpoint(path):
@@ -205,7 +247,7 @@ def main():
             print(f"After successful training: save the final checkpoint and evaluate test ({args.eval_protocol}).", file=sys.stderr)
         return
     env = dict(os.environ)
-    env.setdefault("WANDB_MODE", "online" if args.benchmark == "scienceworld" else "offline")
+    configure_wandb_mode(env, args.benchmark)
     print(f"[launch] WANDB_MODE={env['WANDB_MODE']}", flush=True)
     if args.benchmark != "scienceworld" or args.mode != "train" or args.skip_final_eval:
         subprocess.run(command, cwd=ROOT, env=env, check=True)

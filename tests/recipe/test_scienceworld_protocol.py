@@ -21,6 +21,72 @@ def values(overrides):
     return {key: json.loads(value) for key, value in (item.split("=", 1) for item in overrides if "=" in item)}
 
 
+class WandbModeTests(unittest.TestCase):
+    def test_missing_credentials_defaults_to_offline_with_notice(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            env, output = {}, io.StringIO()
+            with redirect_stdout(output):
+                launch.configure_wandb_mode(env, "scienceworld")
+            self.assertEqual(env["WANDB_MODE"], "offline")
+            self.assertIn("saving metrics offline", output.getvalue())
+
+    def test_environment_credentials_enable_online_without_printing_key(self):
+        for key in ["WANDB_API_KEY", "WANDB_IDENTITY_TOKEN_FILE"]:
+            env = {key: "test-only-private-value"}
+            output = io.StringIO()
+            with redirect_stdout(output):
+                launch.configure_wandb_mode(env, "scienceworld")
+            self.assertEqual(env["WANDB_MODE"], "online")
+            self.assertNotIn(env[key], output.getvalue())
+
+    def test_netrc_login_matches_host_and_honors_custom_path(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            path = Path(directory) / ".netrc"
+            path.write_text("machine api.wandb.ai login user password test-only-key\n")
+            self.assertTrue(launch.has_wandb_credentials({}))
+            self.assertFalse(launch.has_wandb_credentials({"WANDB_BASE_URL": "https://private.example.org"}))
+            custom = Path(directory) / "custom.netrc"
+            custom.write_text("machine private.example.org login user password private-test-key\n")
+            env = {"NETRC": str(custom), "WANDB_BASE_URL": "https://private.example.org"}
+            launch.configure_wandb_mode(env, "scienceworld")
+            self.assertEqual(env["WANDB_MODE"], "online")
+            # An explicit missing NETRC must not fall back to another host's key.
+            self.assertFalse(launch.has_wandb_credentials({"NETRC": str(custom) + ".missing"}))
+
+    def test_unreadable_or_malformed_netrc_falls_back_without_leaking_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "netrc"
+            path.write_text("test-only-secret-invalid-token\n")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                env = {"NETRC": str(path)}
+                launch.configure_wandb_mode(env, "scienceworld")
+            self.assertEqual(env["WANDB_MODE"], "offline")
+            self.assertNotIn("test-only-secret-invalid-token", output.getvalue())
+            with patch.object(launch.netrc, "netrc", side_effect=PermissionError("test-only-secret")):
+                self.assertFalse(launch.has_wandb_credentials({"NETRC": str(path)}))
+
+    def test_explicit_modes_and_webshop_default_do_not_read_credentials(self):
+        with patch.object(launch, "has_wandb_credentials", side_effect=AssertionError("should not inspect credentials")):
+            for mode in ["online", "offline", "disabled", "dryrun"]:
+                env = {"WANDB_MODE": mode}
+                launch.configure_wandb_mode(env, "scienceworld")
+                self.assertEqual(env["WANDB_MODE"], mode)
+            env = {}
+            launch.configure_wandb_mode(env, "webshop")
+            self.assertEqual(env["WANDB_MODE"], "offline")
+
+    def test_batch_job_without_login_launches_offline(self):
+        argv = ["launch", "--benchmark", "scienceworld", "--method", "baseline", "--skip-final-eval"]
+        with patch.object(sys, "argv", argv), patch.object(launch.os, "environ", {}), \
+                patch.object(launch, "has_wandb_credentials", return_value=False), \
+                patch.object(launch.subprocess, "run") as run, redirect_stdout(io.StringIO()):
+            launch.main()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["env"]["WANDB_MODE"], "offline")
+        self.assertFalse(values(run.call_args.args[0])["trainer.val_before_train"])
+
+
 class SelectionTests(unittest.TestCase):
     def test_numeric_first_variations_and_short_types(self):
         rows = [{"task_id": f"a::{i}", "task_type": "a"} for i in [101, 99, 100, 102]]
@@ -187,9 +253,12 @@ class LaunchPipelineTests(unittest.TestCase):
                         "checkpoint": str(checkpoint), "manifest_path": directory + "/tasks.json",
                         "experiment_name": "trained", "validation_data_dir": directory + "/validation"}))
             argv = ["launch", "--benchmark", "scienceworld", "--method", "baseline", "trainer.total_training_steps=2"]
-            with patch.object(sys, "argv", argv), patch.object(launch.subprocess, "run", side_effect=run), redirect_stdout(io.StringIO()):
+            with patch.object(sys, "argv", argv), patch.object(launch.subprocess, "run", side_effect=run), \
+                    patch.object(launch.os, "environ", {}), patch.object(launch, "has_wandb_credentials", return_value=False), \
+                    redirect_stdout(io.StringIO()):
                 launch.main()
             self.assertEqual(len(calls), 2)
+            self.assertEqual([kwargs["env"]["WANDB_MODE"] for _, kwargs in calls], ["offline", "offline"])
             final = values(calls[1][0])
             self.assertEqual(final["trainer.resume_from_path"], str(checkpoint.resolve()))
             self.assertEqual(final["env.task_suite.eval_split"], "test")

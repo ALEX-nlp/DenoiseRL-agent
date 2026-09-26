@@ -45,7 +45,9 @@ bash recipe/denoise_v2/run_scienceworld_grpo_train.sh --skip-final-eval \
   trainer.total_training_steps=2 trainer.total_epochs=2 trainer.test_freq=-1 trainer.save_freq=1
 ```
 
-ScienceWorld 默认 `WANDB_MODE=online`，尊重已有显式环境变量。离线集群可设 `WANDB_MODE=offline`，稍后自行同步。单独评估默认 console；如需 W&B，附加 `trainer.logger='[console,wandb]'`。自动最终评测继承训练的 logger，使用独立 run，并移除训练的显式 W&B run ID，避免合并曲线。
+ScienceWorld 在作业环境有 `WANDB_API_KEY`、`WANDB_IDENTITY_TOKEN_FILE` 或当前 W&B 主机的 netrc 登录时默认 online；未发现这些凭据则打印提示并使用 offline。检查不访问网络、不打印密钥，也不验证服务端权限。已有显式 `WANDB_MODE` 始终优先；通过其他 SDK 设置保存凭据时，可显式设 `WANDB_MODE=online`。单独评估默认 console；如需 W&B，附加 `trainer.logger='[console,wandb]'`。自动最终评测继承训练的模式与 logger，使用独立 run，并移除训练的显式 W&B run ID，避免合并曲线。
+
+如果日志报 `No API key configured`，在**实际执行作业的环境**运行 `wandb login`，或通过平台的秘密环境变量配置 `WANDB_API_KEY`。本机浏览器登录 W&B 不代表计算节点已登录；登录节点的 netrc 也需要能被作业容器读取。随后用 `WANDB_MODE=online` 运行原训练命令即可实时上传。若先离线训练，用 `WANDB_MODE=offline` 运行原命令；指标保存在控制台与本地 W&B 文件，网页不会实时更新，之后可登录并执行 `wandb sync /path/to/wandb/offline-run-...`。
 
 ## 指标与耗时
 

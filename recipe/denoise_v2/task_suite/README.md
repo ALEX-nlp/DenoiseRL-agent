@@ -212,7 +212,7 @@ bash recipe/denoise_v2/run_webshop_denoise_train.sh \
   trainer.val_before_train=False trainer.test_freq=-1 trainer.save_freq=1
 ```
 
-`--dry-run` 输出最终参数列表，不启动 Ray 或加载数据，不执行 Hydra 解析。ScienceWorld 的 `WANDB_MODE` 默认 online，WebShop 默认 offline；显式环境变量优先。checkpoint 自动恢复默认开启；重做实验应使用新的 `EXPERIMENT_NAME` 或传 `trainer.resume_mode=disable`。ScienceWorld 新默认实验名带 `_swiftsage` 后缀，避免误接旧配置；prompt、简化设置和计分变化也会改变恢复指纹。恢复训练需要 `denoise_v2_curriculum.json`，其中记录任务顺序、rho、随机状态和环境指纹。
+`--dry-run` 输出最终参数列表，不启动 Ray 或加载数据，不执行 Hydra 解析。ScienceWorld 自动检查作业环境里的 `WANDB_API_KEY`、`WANDB_IDENTITY_TOKEN_FILE` 或当前 W&B 主机的 netrc 登录：有凭据默认 online，没有则提示并使用 offline，保留指标且不因缺少登录中断训练。这里只检查凭据是否存在，不校验网络或服务端权限。WebShop 默认 offline；显式 `WANDB_MODE` 优先。通过其他 SDK 设置保存凭据时，可显式设 `WANDB_MODE=online`。checkpoint 自动恢复默认开启；重做实验应使用新的 `EXPERIMENT_NAME` 或传 `trainer.resume_mode=disable`。ScienceWorld 新默认实验名带 `_swiftsage` 后缀，避免误接旧配置；prompt、简化设置和计分变化也会改变恢复指纹。恢复训练需要 `denoise_v2_curriculum.json`，其中记录任务顺序、rho、随机状态和环境指纹。
 
 ScienceWorld 训练结束自动保存最终 checkpoint（即使关闭周期保存），随后独立运行正式 test。短训练 smoke test 加 `--skip-final-eval` 可跳过这一阶段。默认每个训练更新记录 `episode/reward/mean`、`episode/success_rate` 等；dev/test 中每批输出完成数、均分和 ETA，并更新本地 `progress.json` 与 W&B summary。一次训练更新本身仍需完成多步 rollout 和 PPO，因此不会每个环境动作都出现一个训练指标点。
 
