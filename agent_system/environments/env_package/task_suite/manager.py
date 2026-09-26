@@ -6,6 +6,7 @@ import numpy as np
 from agent_system.environments.base import EnvironmentManagerBase
 from agent_system.memory import SimpleMemory
 from .runtime import RayTaskEnvs, load_manifest
+from agent_system.scienceworld_protocol import render_prompt
 
 
 def project_actions(text_actions):
@@ -24,8 +25,27 @@ class TaskEnvironmentManager(EnvironmentManagerBase):
         self.memory = SimpleMemory()
 
     def _observations(self):
-        return {"text": self.build_mixed_text_obs_after_prefix(), "image": None,
-                "anchor": list(self.pre_text_obs)}
+        result = {"text": self.build_mixed_text_obs_after_prefix(), "image": None,
+                  "anchor": list(self.pre_text_obs)}
+        if self.config.env.task_suite.benchmark == "scienceworld":
+            result["scienceworld_prompt_parts"] = self._scienceworld_prompt_parts()
+        return result
+
+    def _scienceworld_prompt_parts(self):
+        length = int(self.config.env.history_length)
+        parts = []
+        for i, (obs, info) in enumerate(zip(self.pre_text_obs, self.infos)):
+            history = self.memory._data[i][-length:] if length > 0 else []
+            # Native templates are bounded in number. Exhaustive object-action
+            # combinations can run to thousands of entries and hide the task.
+            templates = info.get("action_templates")
+            if not templates:
+                raise ValueError("ScienceWorld backend must supply action_templates")
+            state = list(dict.fromkeys(s for s in (obs, info.get("look", ""), info.get("inventory", "")) if s))
+            parts.append({"task": info["task_description"], "steps": len(self.memory._data[i]),
+                          "templates": "\n".join(templates), "state": "\n".join(state),
+                          "history": [f"Observation: {h['text_obs']}\nAction: {h['action']}\n" for h in history]})
+        return parts
 
     @staticmethod
     def _verify_shared_states(obs, infos, prefixes):
@@ -75,6 +95,8 @@ class TaskEnvironmentManager(EnvironmentManagerBase):
         return self._observations(), infos
 
     def build_mixed_text_obs_after_prefix(self, prefix_lens=None):
+        if self.config.env.task_suite.benchmark == "scienceworld":
+            return [render_prompt(parts) for parts in self._scienceworld_prompt_parts()]
         history_length = int(self.config.env.history_length)
         prompts = []
         for i, (obs, info) in enumerate(zip(self.pre_text_obs, self.infos)):
@@ -107,11 +129,26 @@ def make_task_envs(config):
     suite = config.env.task_suite
     manifest = load_manifest(suite.manifest_path, suite.benchmark)
     resources = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
-    def create(split, capacity):
-        vector = RayTaskEnvs(manifest, split, capacity, resources, config.env.max_steps, suite.reward_mode)
+    def create(split, capacity, validation=False):
+        vector = RayTaskEnvs(
+            manifest, split, capacity, resources,
+            (suite.get("eval_max_steps") or config.env.max_steps) if validation else config.env.max_steps,
+            suite.reward_mode,
+            per_type_limit=suite.get("eval_per_type_limit") if validation else None,
+            expected_tasks=suite.get("eval_expected_tasks") if validation else None,
+            backend_overrides={key: value for key, value in {
+                "simplifications": suite.get("scienceworld_simplifications"),
+                "score_mode": suite.get("scienceworld_score_mode"),
+                "prompt_version": 2,
+                "env_step_limit": suite.get("eval_env_step_limit") if validation else None,
+                "stop_on_stagnation": suite.get("eval_stop_on_stagnation", False) if validation else False,
+            }.items() if value is not None} if suite.benchmark == "scienceworld" else None,
+        )
+        if validation:
+            vector.eval_protocol = suite.get("eval_protocol", "full")
         return TaskEnvironmentManager(vector, config)
     # Val-only still needs the training manager interface but no unused workers.
     train_capacity = 0 if config.trainer.get("val_only", False) else config.data.train_batch_size * config.env.rollout.n
     train = create("train", train_capacity)
-    val = create(suite.eval_split, config.data.val_batch_size * config.actor_rollout_ref.rollout.val_kwargs.n)
+    val = create(suite.eval_split, config.data.val_batch_size * config.actor_rollout_ref.rollout.val_kwargs.n, validation=True)
     return train, {suite.eval_split: val}

@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import time
 import uuid
 from collections import defaultdict
 from contextlib import contextmanager
@@ -729,6 +730,29 @@ class RayPPOTrainer:
         max_env_batch_size = self._validation_env_batch_size(val_envs)
         val_n = int(self.config.actor_rollout_ref.rollout.val_kwargs.n)
         observed_validation_gamefiles = []
+        scienceworld_validation = task_suite_validation and self.config.env.task_suite.benchmark == "scienceworld"
+        evaluation_started = time.monotonic()
+        native_scores = []
+        invalid_actions, action_count = 0, 0
+        if scienceworld_validation:
+            from agent_system.scienceworld_protocol import score_metrics, task_digest, write_report
+            vector = val_envs.envs
+            val_data_dir = self.config.trainer.get("validation_data_dir")
+            report_dir = os.path.join(val_data_dir, split_name) if val_data_dir and split_name else val_data_dir
+            report = {
+                "protocol": vector.eval_protocol, "split": split_name,
+                "global_step": self.global_steps, "complete": False,
+                "selected_tasks": sample_limit, "native_split_tasks": vector.full_num_games,
+                "task_ids": list(validation_gamefiles), "task_ids_sha256": task_digest(validation_gamefiles),
+                "backend_options": vector.backend_options, "action_limit": vector.max_steps,
+                "environment_fingerprint": vector.task_pool_fingerprint,
+                "repeats": val_n, "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
+                "completed_episodes": 0, "elapsed_seconds": 0,
+            }
+            if report_dir:
+                write_report(report_dir, self.global_steps, report)
+            print(f"[validation/{split_name}] {vector.eval_protocol}: {sample_limit} selected tasks "
+                  f"out of {vector.full_num_games}; action limit={vector.max_steps}", flush=True)
         max_prompt_batch_size = None
         if max_env_batch_size is not None:
             max_prompt_batch_size = max_env_batch_size // max(val_n, 1)
@@ -877,6 +901,11 @@ class RayPPOTrainer:
                         if actual != expected:
                             raise RuntimeError("Validation tasks differ from requested tasks")
                         observed_validation_gamefiles.extend(actual)
+                        if scienceworld_validation:
+                            final_scores = {}
+                            for uid, score in zip(test_batch.non_tensor_batch["traj_uid"], test_batch.non_tensor_batch["task_score"]):
+                                final_scores[uid] = float(score)
+                            native_scores.extend(final_scores[uid] for uid in ordered_batch_traj_uids)
                     else:
                         observed_validation_gamefiles.extend(item["validation_gamefile"] for item in validation_env_kwargs)
                 # success rate
@@ -897,6 +926,33 @@ class RayPPOTrainer:
                         for i in range(1, len(test_batch.non_tensor_batch[k])):
                             assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all success_rate are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
 
+                if scienceworld_validation:
+                    action_validity = np.asarray(test_batch.non_tensor_batch["is_action_valid"], dtype=bool)
+                    invalid_actions += int((~action_validity).sum())
+                    action_count += len(action_validity)
+                    elapsed = time.monotonic() - evaluation_started
+                    eta = elapsed * (sample_limit - processed_samples) / processed_samples
+                    partial_metrics = score_metrics(observed_validation_gamefiles, native_scores, vector.task_types)
+                    report.update({"completed_episodes": len(native_scores), "elapsed_seconds": elapsed,
+                                   "eta_seconds": eta, "metrics": partial_metrics,
+                                   "invalid_action_rate": invalid_actions / max(action_count, 1)})
+                    if report_dir:
+                        write_report(report_dir, self.global_steps, report)
+                    print(f"[validation/{split_name}] {processed_samples}/{sample_limit} tasks; "
+                          f"score={partial_metrics['score']:.2f}/100; elapsed={elapsed / 60:.1f} min; "
+                          f"ETA={eta / 60:.1f} min", flush=True)
+                    tracker = getattr(self, "_tracking_logger", None)
+                    wandb_logger = tracker.logger.get("wandb") if tracker is not None else None
+                    if wandb_logger is not None:
+                        # Summary updates expose progress without advancing the
+                        # training step or publishing partial scores as final.
+                        wandb_logger.run.summary.update({
+                            f"eval_progress/{split_name}/completed_tasks": processed_samples,
+                            f"eval_progress/{split_name}/total_tasks": sample_limit,
+                            f"eval_progress/{split_name}/eta_seconds": eta,
+                            f"eval_progress/{split_name}/partial_score": partial_metrics["score"],
+                        })
+
             if sample_limit is not None and processed_samples >= sample_limit:
                 break
 
@@ -911,7 +967,7 @@ class RayPPOTrainer:
                 coverage_metrics = {key.replace("gamefile", "task"): value for key, value in coverage_metrics.items()}
             split_label = split_name or "alfworld"
             print(
-                f"[validation] {split_label}: exhaustive task coverage verified; "
+                f"[validation] {split_label}: selected task coverage verified; "
                 f"unique={len(validation_gamefiles)}, episodes={len(observed_validation_gamefiles)}."
             )
 
@@ -984,6 +1040,18 @@ class RayPPOTrainer:
 
         for key, value in coverage_metrics.items():
             metric_dict[f'val/{key}'] = value
+
+        if scienceworld_validation:
+            scienceworld_metrics = score_metrics(observed_validation_gamefiles, native_scores, vector.task_types)
+            metric_dict.update({f"val/{key}": value for key, value in scienceworld_metrics.items()})
+            metric_dict["val/invalid_action_rate"] = invalid_actions / max(action_count, 1)
+            report.update({"complete": True, "eta_seconds": 0,
+                           "elapsed_seconds": time.monotonic() - evaluation_started,
+                           "metrics": {key.removeprefix("val/"): float(value) for key, value in metric_dict.items()},
+                           "episodes": [{"task_id": task_id, "score": 100 * score}
+                                        for task_id, score in zip(observed_validation_gamefiles, native_scores)]})
+            if report_dir:
+                write_report(report_dir, self.global_steps, report)
 
         return metric_dict
 
@@ -1183,6 +1251,7 @@ class RayPPOTrainer:
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
+        self._tracking_logger = logger
 
         self.global_steps = 0
 
@@ -1445,7 +1514,7 @@ class RayPPOTrainer:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                    if (self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0)) or (is_last_step and self.config.trainer.get("completion_path")):
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
 
@@ -1465,6 +1534,16 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
+
+                if is_last_step and self.config.trainer.get("completion_path"):
+                    completion = {
+                        "checkpoint": os.path.abspath(os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")),
+                        "manifest_path": self.config.env.task_suite.manifest_path,
+                        "experiment_name": self.config.trainer.experiment_name,
+                        "validation_data_dir": self.config.trainer.validation_data_dir,
+                    }
+                    with open(self.config.trainer.completion_path, "w") as completed:
+                        json.dump(completion, completed)
 
                 progress_bar.update(1)
                 self.global_steps += 1

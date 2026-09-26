@@ -26,6 +26,7 @@ import numpy as np
 from recipe.denoise_v2.gamefile_curriculum import TaskTypePoolCurriculum
 from recipe.denoise_v2.task_suite.launch import build_overrides, resolve_checkpoint
 from agent_system.alfworld_evaluation import build_gamefile_reset_kwargs, validate_gamefile_coverage
+from agent_system.scienceworld_protocol import render_prompt
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "agent_system/environments/env_package/task_suite"
@@ -60,7 +61,7 @@ base_ns = load_definitions(ROOT / "agent_system/environments/base.py", {"default
 memory_ns = load_definitions(ROOT / "agent_system/memory/memory.py", {"BaseMemory": object})
 manager_ns = load_definitions(PACKAGE / "manager.py", {
     "EnvironmentManagerBase": base_ns["EnvironmentManagerBase"], "SimpleMemory": memory_ns["SimpleMemory"],
-    "np": np, "re": __import__("re"),
+    "np": np, "re": __import__("re"), "render_prompt": render_prompt,
 })
 Manager = manager_ns["TaskEnvironmentManager"]
 Collector = load_definitions(ROOT / "recipe/denoise_v2/collector.py", {

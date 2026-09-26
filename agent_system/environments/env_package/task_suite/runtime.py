@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 from .backends import fingerprint, make_backend, WebShopBackend
+from agent_system.scienceworld_protocol import select_tasks
 
 
 def load_manifest(path, benchmark):
@@ -103,19 +104,33 @@ class TaskWorkerGroup:
 
 
 class RayTaskEnvs:
-    def __init__(self, manifest, split, num_processes, resources, max_steps, reward_mode):
+    def __init__(self, manifest, split, num_processes, resources, max_steps, reward_mode,
+                 per_type_limit=None, backend_overrides=None, expected_tasks=None):
         import ray
         self.ray = ray
-        self.task_pool_fingerprint = fingerprint({"manifest": manifest, "max_steps": max_steps, "reward_mode": reward_mode})
-        self.task_ids = tuple(row["task_id"] for row in manifest["splits"][split])
-        self.task_types = {row["task_id"]: row["task_type"] for row in manifest["splits"][split]}
+        self.max_steps = int(max_steps)
+        self.backend_options = {**manifest["backend_options"], **(backend_overrides or {})}
+        identity = {"manifest": manifest, "max_steps": max_steps, "reward_mode": reward_mode}
+        if backend_overrides:
+            identity["backend_overrides"] = backend_overrides
+        self.task_pool_fingerprint = fingerprint(identity)
+        rows = manifest["splits"][split]
+        self.full_num_games = len(rows)
+        if per_type_limit is not None:
+            if split == "train" or manifest["benchmark"] != "scienceworld":
+                raise ValueError("Per-type evaluation selection is only supported for ScienceWorld dev/test")
+            rows = select_tasks(rows, per_type_limit)
+        self.task_ids = tuple(row["task_id"] for row in rows)
+        self.task_types = {row["task_id"]: row["task_type"] for row in rows}
         self.allowed_ids = set(self.task_ids)
         self.num_games = len(self.task_ids)
+        if expected_tasks is not None and self.num_games != expected_tasks:
+            raise ValueError(f"Evaluation protocol expects {expected_tasks} tasks, found {self.num_games}; check simulator/splits")
         self.num_processes = int(num_processes)
         self.active_processes = 0
         self.slots_per_worker = 16 if manifest["benchmark"] == "webshop" else 1
         actor = ray.remote(**resources)(TaskWorkerGroup)
-        self.workers = [actor.remote(manifest["benchmark"], manifest["backend_options"], max_steps,
+        self.workers = [actor.remote(manifest["benchmark"], self.backend_options, max_steps,
                                      reward_mode, manifest.get("catalog_fingerprint"),
                                      min(self.slots_per_worker, self.num_processes - start))
                         for start in range(0, self.num_processes, self.slots_per_worker)]

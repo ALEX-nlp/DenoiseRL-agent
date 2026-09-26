@@ -99,6 +99,13 @@ class TrajectoryCollector:
             tokenize=False,
             **apply_chat_template_kwargs
         )
+        if "scienceworld_prompt_parts" in obs:
+            from agent_system.scienceworld_protocol import bounded_chat
+            chat, prompt_with_chat_template = bounded_chat(
+                obs["scienceworld_prompt_parts"][item], self.tokenizer,
+                self.config.data.max_prompt_length, apply_chat_template_kwargs,
+            )
+            chat = np.asarray(chat, dtype=object)
         
         # Initialize return dict
         row_dict = {}

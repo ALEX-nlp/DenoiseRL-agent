@@ -116,8 +116,11 @@ class ScienceWorldBackend:
             raise ValueError("ScienceWorld version/JAR differs from the prepared task manifest")
         self.options = options
         self.env = ScienceWorldEnv(serverPath=options.get("jar_path"),
-                                   envStepLimit=int(options.get("max_steps", 100)))
+                                   envStepLimit=int(options.get("env_step_limit", options.get("max_steps", 100))))
         self.simplifications = options.get("simplifications", "")
+        self.score_mode = options.get("score_mode", "terminal")
+        if self.score_mode not in {"terminal", "last_nonnegative"}:
+            raise ValueError(f"Unknown ScienceWorld score mode: {self.score_mode}")
         self.catalog_fingerprint = None
 
     def catalog(self):
@@ -132,10 +135,14 @@ class ScienceWorldBackend:
 
     def _info(self, info):
         raw_score = float(info["score"])
+        score = raw_score
+        if getattr(self, "score_mode", "terminal") == "last_nonnegative":
+            score = self.last_nonnegative_score
         return {"task_id": self.task_id,
                 "task_description": info.get("taskDesc", self.env.get_task_description()),
                 "admissible_actions": list(info.get("valid", [])),
-                "task_score": max(0.0, min(1.0, raw_score / 100.0)),
+                "action_templates": getattr(self, "action_templates", []),
+                "task_score": max(0.0, min(1.0, score / 100.0)),
                 "raw_score": raw_score, "won": raw_score >= 100,
                 "look": info.get("look", ""), "inventory": info.get("inv", "")}
 
@@ -144,6 +151,9 @@ class ScienceWorldBackend:
         name, variation = self.task_id.rsplit("::", 1)
         self.env.load(name, int(variation), self.simplifications, generateGoldPath=False)
         obs, info = self.env.reset()
+        self.action_templates = list(self.env.get_possible_actions())
+        self.last_nonnegative_score = max(0.0, float(info["score"]))
+        self.recent_deltas = [0.0]
         if info["taskName"] != name or int(info["variationIdx"]) != int(variation):
             raise RuntimeError("ScienceWorld loaded a different task or variation")
         self.previous_actions = set(info.get("valid", []))
@@ -152,6 +162,14 @@ class ScienceWorldBackend:
     def step(self, action):
         valid = action in self.previous_actions
         obs, _delta_reward, done, info = self.env.step(action)
+        raw_score = float(info["score"])
+        self.recent_deltas.append(raw_score - self.last_nonnegative_score)
+        done = bool(done) or raw_score < 0
+        stagnant = (self.options.get("stop_on_stagnation", False)
+                    and len(self.recent_deltas) >= 100 and sum(self.recent_deltas[-30:]) == 0)
+        if raw_score >= 0 and not stagnant:
+            self.last_nonnegative_score = raw_score
+        done = done or stagnant
         self.previous_actions = set(info.get("valid", []))
         normalized = self._info(info)
         normalized["is_action_valid"] = valid

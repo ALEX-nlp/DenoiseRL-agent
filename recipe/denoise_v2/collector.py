@@ -355,11 +355,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
                 return None
             return [value[i] for i in indices]
 
-        return {
-            "text": _take(obs.get("text", None)),
-            "image": _take(obs.get("image", None)),
-            "anchor": _take(obs.get("anchor", None)),
-        }
+        return {key: _take(value) for key, value in obs.items()}
 
     def _preprocess_batch_with_tokenizer(self, gen_batch: DataProto, obs: dict, tokenizer) -> DataProto:
         batch_size = len(gen_batch.batch["input_ids"])
@@ -378,6 +374,12 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
                 tokenize=False,
                 **apply_chat_template_kwargs,
             )
+            if "scienceworld_prompt_parts" in obs:
+                from agent_system.scienceworld_protocol import bounded_chat
+                chat, prompt_with_chat_template = bounded_chat(
+                    obs["scienceworld_prompt_parts"][item], tokenizer,
+                    self.online_prompt_length, apply_chat_template_kwargs,
+                )
             input_ids, attention_mask = verl_F.tokenize_and_postprocess_data(
                 prompt=prompt_with_chat_template,
                 tokenizer=tokenizer,
@@ -433,6 +435,8 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
         return batch_input
 
     def _current_obs_from_envs(self, envs, prefix_lens: np.ndarray) -> dict:
+        if hasattr(envs, "_observations"):
+            return envs._observations()
         if not hasattr(envs, "build_mixed_text_obs_after_prefix"):
             raise NotImplementedError("Online DenoiseRL requires a replayable text environment manager.")
         text_obs = envs.build_mixed_text_obs_after_prefix(prefix_lens.tolist())
@@ -980,8 +984,13 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
 
-        for _step in range(self.config.env.max_steps):
+        rollout_limit = getattr(getattr(envs, "envs", None), "max_steps", self.config.env.max_steps)
+        scienceworld = "scienceworld" in self.config.env.env_name.lower()
+        for _step in range(rollout_limit):
             active_masks = np.logical_not(is_done)
+            if scienceworld and _step % 20 == 0:
+                phase = "eval" if gen_batch.meta_info.get("validate", False) else "train"
+                print(f"[scienceworld/{phase}] action round {_step}/{rollout_limit}; active={int(active_masks.sum())}/{batch_size}", flush=True)
             batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -1011,6 +1020,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
             next_obs, rewards, dones, infos = envs.step(text_actions)
             if infos and "task_id" in infos[0]:
                 batch.non_tensor_batch["task_id"] = np.asarray([info["task_id"] for info in infos], dtype=object)
+                batch.non_tensor_batch["task_score"] = np.asarray([info["task_score"] for info in infos], dtype=np.float32)
 
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MODEL_ROOT = Path("/inspire/hdd/global_user/xucaijun-253108120121/Model")
@@ -36,6 +37,10 @@ def build_overrides(args):
     profile = recommended(args.benchmark)
     denoise = args.method == "denoise" and args.mode == "train"
     training = args.mode == "train"
+    scienceworld = args.benchmark == "scienceworld"
+    eval_split = args.eval_split or ("test" if scienceworld and not training else "dev")
+    if scienceworld and training and eval_split != "dev":
+        raise ValueError("Use dev for training monitoring; test is reserved for the final evaluation")
     data_dir = Path(args.data_dir or ROOT / "recipe/denoise_v2/local_data" / args.benchmark).expanduser().resolve()
     model_root = os.getenv("MODEL_ROOT")
     def model_path(env_key, default):
@@ -43,10 +48,10 @@ def build_overrides(args):
         if path is None:
             return str(Path(model_root or DEFAULT_MODEL_ROOT) / default)
         return str(Path(model_root) / path) if model_root and not Path(path).is_absolute() else path
-    experiment = os.getenv("EXPERIMENT_NAME", f"{args.benchmark}_{args.method}_7b_seed{args.seed}")
+    experiment = os.getenv("EXPERIMENT_NAME", f"{args.benchmark}_{args.method}_7b_seed{args.seed}" + ("_swiftsage" if scienceworld else ""))
     values = {
         "data.train_files": str(data_dir / "train.parquet"),
-        "data.val_files": str(data_dir / f"{args.eval_split}.parquet"),
+        "data.val_files": str(data_dir / f"{eval_split}.parquet"),
         "data.train_batch_size": int(os.getenv("TRAIN_BATCH_SIZE", profile["batch"])),
         "data.val_batch_size": int(os.getenv("VAL_BATCH_SIZE", 16 if args.benchmark == "webshop" else 8)),
         "data.max_prompt_length": profile["prompt"], "data.max_response_length": 256,
@@ -82,7 +87,7 @@ def build_overrides(args):
         "env.env_name": f"{args.benchmark}/TaskSuite",
         "env.task_suite.benchmark": args.benchmark,
         "env.task_suite.manifest_path": str(data_dir / "tasks.json"),
-        "env.task_suite.eval_split": args.eval_split,
+        "env.task_suite.eval_split": eval_split,
         "env.task_suite.reward_mode": "score",
         "env.seed": args.seed, "env.max_steps": profile["steps"], "env.history_length": profile["history"],
         "env.rollout.n": 16,
@@ -109,6 +114,22 @@ def build_overrides(args):
         "trainer.rollout_data_dir": str(ROOT / "recipe/denoise_v2/dumps" / experiment / "rollout"),
         "trainer.validation_data_dir": str(ROOT / "recipe/denoise_v2/dumps" / experiment / "validation"),
     }
+    if scienceworld:
+        protocol = getattr(args, "eval_protocol", "swiftsage")
+        values.update({
+            "env.task_suite.scienceworld_simplifications": "easy",
+            "env.task_suite.scienceworld_score_mode": "last_nonnegative",
+            "env.task_suite.eval_protocol": "dev_monitor" if training else protocol,
+            "env.task_suite.eval_per_type_limit": 3 if training else ((3 if eval_split == "dev" else 10) if protocol == "swiftsage" else None),
+            "env.task_suite.eval_expected_tasks": 270 if not training and eval_split == "test" and protocol == "swiftsage" else None,
+            "env.task_suite.eval_max_steps": 100 if training else 600,
+            "env.task_suite.eval_env_step_limit": 100 if training else 300,
+            "env.task_suite.eval_stop_on_stagnation": not training,
+            "trainer.val_before_train": not training,
+        })
+        if not training:
+            values["trainer.experiment_name"] = experiment + f"_{eval_split}_{protocol}"
+            values["trainer.validation_data_dir"] = str(Path(values["trainer.validation_data_dir"]) / f"eval_{protocol}")
     if not denoise:
         # The clean baseline retains task-pool traversal but never adds noise.
         values.update({
@@ -127,13 +148,46 @@ def build_overrides(args):
     return [f"{key}={json.dumps(value)}" for key, value in values.items()]
 
 
+def final_evaluation_overrides(completion, protocol):
+    """Reuse the trained model/config, but isolate the held-out evaluation."""
+    checkpoint = resolve_checkpoint(completion["checkpoint"])
+    values = {
+        "data.val_files": str(Path(completion["manifest_path"]).parent / "test.parquet"),
+        "env.task_suite.eval_split": "test",
+        "env.task_suite.eval_protocol": protocol,
+        "env.task_suite.eval_per_type_limit": 10 if protocol == "swiftsage" else None,
+        "env.task_suite.eval_expected_tasks": 270 if protocol == "swiftsage" else None,
+        "env.task_suite.eval_max_steps": 600,
+        "env.task_suite.eval_env_step_limit": 300,
+        "env.task_suite.eval_stop_on_stagnation": True,
+        "env.task_suite.scienceworld_simplifications": "easy",
+        "env.task_suite.scienceworld_score_mode": "last_nonnegative",
+        "env.task_suite.reward_mode": "score",
+        "env.denoise.enable": False, "env.denoise.v2.enabled": False,
+        "env.denoise.online.model_path": None,
+        "actor_rollout_ref.actor.use_kl_loss": False,
+        "actor_rollout_ref.rollout.val_kwargs.n": 1,
+        "actor_rollout_ref.rollout.val_kwargs.do_sample": False,
+        "actor_rollout_ref.rollout.val_kwargs.temperature": 0.0,
+        "trainer.val_only": True, "trainer.val_before_train": True,
+        "trainer.resume_mode": "resume_path", "trainer.resume_from_path": checkpoint,
+        "trainer.completion_path": None,
+        "trainer.experiment_name": completion["experiment_name"] + "_test_" + protocol,
+        "trainer.validation_data_dir": str(Path(completion["validation_data_dir"]) / ("final_" + protocol)),
+    }
+    return [f"{key}={json.dumps(value)}" for key, value in values.items()]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", choices=["webshop", "scienceworld", "sciworld"], required=True)
     parser.add_argument("--method", choices=["baseline", "denoise"], default="denoise")
     parser.add_argument("--mode", choices=["train", "eval"], default="train")
     parser.add_argument("--data-dir", default=os.getenv("TASK_DATA_DIR"))
-    parser.add_argument("--eval-split", choices=["dev", "test"], default="dev")
+    parser.add_argument("--eval-split", choices=["dev", "test"], default=None)
+    parser.add_argument("--eval-protocol", choices=["swiftsage", "full"], default="swiftsage",
+                        help="ScienceWorld: paper's first 10 test variations per type, or all native test variations")
+    parser.add_argument("--skip-final-eval", action="store_true", help="Skip automatic ScienceWorld evaluation after training")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", default=os.getenv("CKPT_DIR"))
     parser.add_argument("--base-model", action="store_true")
@@ -147,10 +201,29 @@ def main():
     command += build_overrides(args) + overrides
     if args.dry_run:
         print(json.dumps(command, indent=2))
+        if args.benchmark == "scienceworld" and args.mode == "train" and not args.skip_final_eval:
+            print(f"After successful training: save the final checkpoint and evaluate test ({args.eval_protocol}).", file=sys.stderr)
         return
     env = dict(os.environ)
-    env.setdefault("WANDB_MODE", "offline")
-    subprocess.run(command, cwd=ROOT, env=env, check=True)
+    env.setdefault("WANDB_MODE", "online" if args.benchmark == "scienceworld" else "offline")
+    print(f"[launch] WANDB_MODE={env['WANDB_MODE']}", flush=True)
+    if args.benchmark != "scienceworld" or args.mode != "train" or args.skip_final_eval:
+        subprocess.run(command, cwd=ROOT, env=env, check=True)
+        return
+    # A unique success marker prevents evaluating a stale checkpoint after a
+    # failed/empty/resumed run. It is written only after the final save succeeds.
+    with tempfile.TemporaryDirectory(prefix="scienceworld-completion-") as directory:
+        completion_path = Path(directory) / "completed.json"
+        train_command = command + [f"trainer.completion_path={json.dumps(str(completion_path))}"]
+        subprocess.run(train_command, cwd=ROOT, env=env, check=True)
+        if not completion_path.is_file():
+            raise RuntimeError("Training did not produce a final checkpoint marker; refusing to evaluate a stale checkpoint")
+        completion = json.loads(completion_path.read_text())
+        final_command = command + final_evaluation_overrides(completion, args.eval_protocol)
+        print(f"[launch] Final test evaluation: {completion['checkpoint']} ({args.eval_protocol})", flush=True)
+        # An explicitly set W&B run ID must not merge train and test runs.
+        eval_env = {key: value for key, value in env.items() if key not in {"WANDB_RUN_ID", "WANDB_RESUME"}}
+        subprocess.run(final_command, cwd=ROOT, env=eval_env, check=True)
 
 
 if __name__ == "__main__":

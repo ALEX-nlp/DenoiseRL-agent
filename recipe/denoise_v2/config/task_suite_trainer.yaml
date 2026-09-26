@@ -18,8 +18,17 @@ env:
     manifest_path: null
     eval_split: dev
     reward_mode: score
+    eval_protocol: full
+    eval_per_type_limit: null
+    eval_expected_tasks: null
+    eval_max_steps: null
+    eval_env_step_limit: null
+    eval_stop_on_stagnation: False
+    scienceworld_simplifications: null
+    scienceworld_score_mode: null
   # Inherit the ALFWorld v2 controller unchanged: rho=[0, 0.5],
   # initial_rho=0, target_accuracy=0.75, alpha=0.2.
 
 trainer:
   project_name: denoise_v2_task_suite
+  completion_path: null

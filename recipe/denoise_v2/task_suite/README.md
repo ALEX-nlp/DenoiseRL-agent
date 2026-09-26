@@ -12,10 +12,10 @@
 - `rho <- clip(rho + alpha * (本批该类型完全成功率 - target), 0, max_rho)`。先对 16 条轨迹求成功率，再对同类型任务等权平均；不使用部分得分更新 rho。
 - 在线模式沿用 ALFWorld v2：**没有筛掉弱模型的成功轨迹**，所以前缀可能包含错误，也可能包含有效进展。
 - 前缀动作重放进环境和历史；只有 solver 新动作参与 PPO。前缀消耗环境步数预算，遇到终止状态的前缀会报错；相同 task/prefix 返回不同状态也会报错。
-- 两个方法都使用一次性的 **terminal score reward**：WebShop 为原生 0–1 得分，ScienceWorld 为终止/步数上限时的 `clip(score, 0, 100)/100`。中间步骤 reward=0，避免重复累加进度。原始 score=-1 的失败映射为 0。该定义会奖励继承前缀后最终达到的部分进度。
+- 两个方法都使用一次性的 **terminal score reward**：WebShop 为原生 0–1 得分；ScienceWorld 默认采用 SwiftSage 的末次非负分数，除以 100。不可恢复失败保留失败前的进度，完全成功仍要求原生 score=100。中间步骤 reward=0，避免重复累加进度。该定义会奖励继承前缀后最终达到的部分进度。
 - 完全成功独立统计：WebShop score=1，ScienceWorld score=100。`env.task_suite.reward_mode=success` 可改为纯二值 reward；做比较时两组都要改。
 - WebShop 新划分为 train `[1500, n)`、dev `[500,1500)`、test `[0,500)`，与 bundled upstream baseline 一致；不同于旧环境 wrapper 的 train `[500,n)`。ScienceWorld 直接使用官方 `get_variations_train/dev/test()`，不随机重划。
-- 训练中只评估 dev。最终显式选择 test，全量遍历一次，断言实际 task ID、数量、重复次数与请求一致。评估从干净初始状态开始，不需要弱模型或 curriculum 文件。
+- 训练中只评估 dev。ScienceWorld 默认跳过初始评估，每 25 步评估固定小 dev 集，训练成功后自动用最终 checkpoint 跑 SwiftSage 270-task test；WebShop 保持全量评估。所有评估断言实际 task ID、数量、重复次数与选定任务集一致，从干净初始状态开始，不需要弱模型或 curriculum 文件。
 
 ## rho 分组的含义
 
@@ -66,8 +66,12 @@ ScienceWorld 的分组对应任务行为类型。WebShop 默认使用 `--webshop
 | target success | — / 0.75 | — / 0.75 |
 | solver / weak vLLM memory fraction | 0.5 / 0.2（仅 denoise） | 0.5 / 0.2（仅 denoise） |
 | 并行评估任务 | 16 | 8 |
+| 训练前评估 | 全量 dev | 默认跳过 |
+| 训练中 dev 集 | 全量 | 每类型前 3 个 variation，约 90 个 |
+| 正式 test | 全量 500 个 | 每类型前 10 个 variation，共 270 个 |
+| 正式 test 动作 / 原生 moves 上限 | 15 / — | 600 / 300 |
 
-这里 PPO mini batch 的单位是 collector 展开的动作行，不是完整轨迹。500 steps 是初次实验预算，不保证收敛；全量 dev 评估在 ScienceWorld 上可能较慢，可以增大 `trainer.test_freq`，不要通过减少 test 覆盖率来加速最终评估。
+这里 PPO mini batch 的单位是 collector 展开的动作行，不是完整轨迹。500 steps 是初次实验预算，不保证收敛。ScienceWorld 的训练/dev 监控预算为 100 次动作，只用于观察训练趋势；正式 test 使用较长预算，二者分开记录。完整参考协议、来源和所有原生 test variation 的可选评估见 [ScienceWorld 评测协议](SCIENCEWORLD_EVALUATION.md)。
 
 三个环境统一使用每批 16 个具体任务、每任务 16 条 rollout。DenoiseRL 的 initial_rho=0、min_rho=0、max_rho=0.5、target_accuracy=0.75、alpha=0.2；baseline 固定 rho=0。ScienceWorld 仅保留适合长任务的步数预算和历史长度。若 rho 长期为 0，应先检查对应任务类型的完全成功率。
 
@@ -125,7 +129,7 @@ EXPERIMENT_NAME=webshop_category_denoise_7b_seed0 \
 
 新生成清单默认推荐 `structure`。baseline 读取相同清单但 rho 仍固定为 0；分组改动不改变每批任务数、rollout 数或 rho 更新公式。
 
-ScienceWorld 默认 **不使用 simplifications**。若实验需要可显式传入 `--simplifications teleportAction,openDoors`，并为该协议使用独立的数据目录和实验名。可传 `--jar-path /absolute/scienceworld.jar` 指定 JAR。始终 `generateGoldPath=False`，不读取专家轨迹。
+ScienceWorld 启动器默认使用 SwiftSage 的 `simplifications=easy`，覆盖旧 manifest 的 simplifications，并把有效配置写入评测报告及训练环境指纹。新建 manifest 建议给 `prepare_tasks` 加 `--simplifications easy`，让原生 smoke test 也使用相同设置。自定义协议可覆盖 `env.task_suite.scienceworld_simplifications`，需使用独立实验名；不能与默认协议混报。可传 `--jar-path /absolute/scienceworld.jar` 指定 JAR。始终 `generateGoldPath=False`，不读取专家轨迹。
 
 WebShop 可用 `--webshop-data-dir` 指定 JSON 文件目录，但搜索索引仍由 bundled WebShop 加载，须与这批商品匹配。manifest 记录绝对路径，迁移到集群后应在集群重新生成 manifest。
 
@@ -208,7 +212,9 @@ bash recipe/denoise_v2/run_webshop_denoise_train.sh \
   trainer.val_before_train=False trainer.test_freq=-1 trainer.save_freq=1
 ```
 
-`--dry-run` 输出最终参数列表，不启动 Ray 或加载数据，不执行 Hydra 解析。`WANDB_MODE` 默认 offline。checkpoint 自动恢复默认开启；重做实验应使用新的 `EXPERIMENT_NAME` 或传 `trainer.resume_mode=disable`。恢复训练需要 `denoise_v2_curriculum.json`，其中记录任务顺序、rho、随机状态和环境指纹。
+`--dry-run` 输出最终参数列表，不启动 Ray 或加载数据，不执行 Hydra 解析。ScienceWorld 的 `WANDB_MODE` 默认 online，WebShop 默认 offline；显式环境变量优先。checkpoint 自动恢复默认开启；重做实验应使用新的 `EXPERIMENT_NAME` 或传 `trainer.resume_mode=disable`。ScienceWorld 新默认实验名带 `_swiftsage` 后缀，避免误接旧配置；prompt、简化设置和计分变化也会改变恢复指纹。恢复训练需要 `denoise_v2_curriculum.json`，其中记录任务顺序、rho、随机状态和环境指纹。
+
+ScienceWorld 训练结束自动保存最终 checkpoint（即使关闭周期保存），随后独立运行正式 test。短训练 smoke test 加 `--skip-final-eval` 可跳过这一阶段。默认每个训练更新记录 `episode/reward/mean`、`episode/success_rate` 等；dev/test 中每批输出完成数、均分和 ETA，并更新本地 `progress.json` 与 W&B summary。一次训练更新本身仍需完成多步 rollout 和 PPO，因此不会每个环境动作都出现一个训练指标点。
 
 ## 评估
 
@@ -224,13 +230,13 @@ bash recipe/denoise_v2/run_webshop_eval.sh \
   --checkpoint checkpoints/denoise_v2_webshop/webshop_denoise_7b_seed0 \
   --eval-split test
 bash recipe/denoise_v2/run_scienceworld_eval.sh \
-  --checkpoint checkpoints/denoise_v2_scienceworld/scienceworld_denoise_7b_seed0 \
+  --checkpoint checkpoints/denoise_v2_scienceworld/scienceworld_denoise_7b_seed0_swiftsage \
   --eval-split test
 ```
 
-`--checkpoint` 接受实验根目录、`global_step_N` 或其 `actor` 子目录。评估指标包括 `val/test/success_rate`（完全成功）、`val/test/test_score`（归一化最终分数）、各任务类型成功率及 `task_coverage=1`。ScienceWorld score 乘 100 才是官方 0–100 量纲。
+`--checkpoint` 接受实验根目录、`global_step_N` 或其 `actor` 子目录。ScienceWorld 单独评估默认 test；`--eval-protocol full` 可遍历原生 split 的全部 variation。指标包括 `val/test/success_rate`（完全成功）、`val/test/test_score`（0–1 reward）及选定任务集的 `task_coverage=1`。ScienceWorld 新增 `val/test/score_macro`（类型等权，0–100）、`val/test/score`（episode 等权，0–100）、各类型分数和无效动作率；覆盖率不等于原生 split 全量覆盖，报告同时记录两种任务数。
 
-rollout 和 validation JSONL 位于 `recipe/denoise_v2/dumps/<experiment>/`；validation 每行是一条折叠后的 solver 轨迹，包含实际 `task_id`。最终比较建议使用同一 manifest、相同种子集合，报告 SR、score、solver tokens、弱模型 tokens、环境交互数与墙钟时间；相同训练 steps 并不代表 DenoiseRL 的总计算量与 baseline 相同。
+rollout 和 validation JSONL 位于 `recipe/denoise_v2/dumps/<experiment>/`；validation 每行是一条折叠后的 solver 轨迹，包含实际 `task_id`。ScienceWorld 同时保存 `<step>.summary.json`；自动最终评测位于 `validation/final_swiftsage/test/`，W&B 使用独立的 `<experiment>_test_swiftsage` run。最终比较建议使用同一 manifest、相同种子集合，报告 SR、score、solver tokens、弱模型 tokens、环境交互数与墙钟时间；相同训练 steps 并不代表 DenoiseRL 的总计算量与 baseline 相同。
 
 ## 验证范围
 
@@ -239,7 +245,7 @@ CPU 契约测试覆盖固定任务、跨 split 去重、共享前缀、零 rho �
 ```bash
 python -m unittest tests.recipe.test_task_suite tests.recipe.test_denoise_v2 \
   tests.recipe.test_denoise_v2_efficiency tests.recipe.test_alfworld_exhaustive_validation \
-  tests.recipe.test_task_suite_environment
+  tests.recipe.test_task_suite_environment tests.recipe.test_scienceworld_protocol
 ```
 
 这些测试使用模拟 backend，不能替代上面的真实环境 smoke test 或 GPU 训练。推荐参数不是已经复现出的 benchmark 最优参数。
