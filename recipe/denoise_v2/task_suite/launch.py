@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_MODEL_ROOT = Path("/inspire/hdd/global_user/xucaijun-253108120121/Model")
 
 
 def resolve_checkpoint(path):
@@ -38,7 +39,9 @@ def build_overrides(args):
     data_dir = Path(args.data_dir or ROOT / "recipe/denoise_v2/local_data" / args.benchmark).expanduser().resolve()
     model_root = os.getenv("MODEL_ROOT")
     def model_path(env_key, default):
-        path = os.getenv(env_key, default)
+        path = os.getenv(env_key)
+        if path is None:
+            return str(Path(model_root or DEFAULT_MODEL_ROOT) / default)
         return str(Path(model_root) / path) if model_root and not Path(path).is_absolute() else path
     experiment = os.getenv("EXPERIMENT_NAME", f"{args.benchmark}_{args.method}_7b_seed{args.seed}")
     values = {

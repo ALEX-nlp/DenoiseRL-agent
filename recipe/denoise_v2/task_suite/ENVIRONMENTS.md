@@ -186,6 +186,6 @@ ScienceWorld 同样使用对应脚本和独立实验名。两步 smoke 主要检
 
 ## 联网与验证范围
 
-首次安装默认通过内网 Nexus 源获取 Conda / PyPI 包，同时需要访问 GitHub（ScienceWorld、spaCy 模型，以及可能的 FlashAttention wheel）；这些固定直链没有对应的内网制品地址，不能仅靠包索引换源替代。WebShop 数据默认来自固定版本的 Hugging Face 副本，也支持原始 Google Drive 来源。模型权重来自 Hugging Face，已有 ALFWorld 的本地 Qwen2.5 模型可通过 `MODEL_PATH` / `DENOISE_MODEL_PATH` 复用，不必重复下载。依赖、JAR、数据、索引和模型齐备后可以离线运行，相关变量见 [任务文档](README.md)。
+首次安装默认通过内网 Nexus 源获取 Conda / PyPI 包，同时需要访问 GitHub（ScienceWorld、spaCy 模型，以及可能的 FlashAttention wheel）；这些固定直链没有对应的内网制品地址，不能仅靠包索引换源替代。WebShop 数据默认来自固定版本的 Hugging Face 副本，也支持原始 Google Drive 来源。训练启动器默认复用 `/inspire/hdd/global_user/xucaijun-253108120121/Model/Qwen/` 下的 `Qwen2.5-7B-Instruct` 和 `Qwen2.5-1.5B-Instruct`，不必重复下载；可通过 `MODEL_ROOT` 或 `MODEL_PATH` / `DENOISE_MODEL_PATH` 覆盖。依赖、JAR、数据、索引和模型齐备后可以离线运行，相关变量见 [任务文档](README.md)。
 
 开发时已针对 Linux x86_64 / Python 3.10 解析两个 fresh profile 的依赖；FlashAttention 单独安装，尚未验证其编译与 CUDA ABI。CPU 测试覆盖安装目标隔离、失败恢复和数据索引替换。未在本地 macOS 上创建这些 CUDA 环境，服务器上的完整安装、原生环境 smoke test 和 GPU 短训练仍需实际执行。

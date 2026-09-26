@@ -154,7 +154,12 @@ bash recipe/denoise_v2/run_scienceworld_grpo_train.sh
 bash recipe/denoise_v2/run_scienceworld_denoise_train.sh
 ```
 
-默认模型名按 Hugging Face ID 解释。离线集群可设置 `MODEL_ROOT`，或直接设置绝对路径：
+四个训练入口及对应评估入口默认使用服务器上的本地模型，无需先 `export`：
+
+- solver：`/inspire/hdd/global_user/xucaijun-253108120121/Model/Qwen/Qwen2.5-7B-Instruct`
+- DenoiseRL 弱模型：`/inspire/hdd/global_user/xucaijun-253108120121/Model/Qwen/Qwen2.5-1.5B-Instruct`（baseline 不加载）
+
+可设置 `MODEL_ROOT` 替换默认的 `Model` 根目录，保留其下的 `Qwen/...` 结构；也可通过 `MODEL_PATH` / `DENOISE_MODEL_PATH` 单独覆盖。例如：
 
 ```bash
 MODEL_PATH=/models/Qwen2.5-7B-Instruct \
@@ -163,7 +168,9 @@ bash recipe/denoise_v2/run_scienceworld_denoise_train.sh \
   --seed 1 env.denoise.v2.target_accuracy=0.75
 ```
 
-首次使用需准备两个 Hugging Face 模型的完整权重、tokenizer 与配置；已用于 ALFWorld 的本地模型可直接复用。baseline 仅加载 7B solver，DenoiseRL 还加载 1.5B 弱模型。可在联网机器上用训练环境已有的 `huggingface_hub` 下载，替换下面的存储目录为实际路径：
+若显式设置 `MODEL_PATH=Qwen/Qwen2.5-7B-Instruct` 或 `DENOISE_MODEL_PATH=Qwen/Qwen2.5-1.5B-Instruct`，且未设置 `MODEL_ROOT`，仍可使用 Hugging Face 模型 ID。
+
+本地模型目录需包含完整权重、tokenizer 与配置；已用于 ALFWorld 的模型可直接复用，无需重新下载。baseline 仅加载 7B solver，DenoiseRL 还加载 1.5B 弱模型。若其他机器尚未准备模型，可用训练环境已有的 `huggingface_hub` 下载，替换下面的存储目录为实际路径：
 
 ```bash
 python - <<'PY'
