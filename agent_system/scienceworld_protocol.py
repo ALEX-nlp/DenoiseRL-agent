@@ -47,6 +47,17 @@ def score_metrics(task_ids, scores, task_types):
     return metrics
 
 
+def truncation_metrics(truncated, scores):
+    """One flag/normalized score per episode, independent of trajectory length."""
+    if len(truncated) != len(scores) or len(scores) == 0:
+        raise ValueError("Expected matching nonempty episode cutoff flags and scores")
+    cutoff_scores = [float(score) for flag, score in zip(truncated, scores) if flag]
+    metrics = {"truncation_rate": len(cutoff_scores) / len(scores)}
+    if cutoff_scores:
+        metrics["truncated_score_mean"] = 100 * sum(cutoff_scores) / len(cutoff_scores)
+    return metrics
+
+
 def write_report(directory, step, report):
     """Persist partial progress atomically; final reports also retain the step."""
     directory = Path(directory)

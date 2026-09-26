@@ -74,11 +74,11 @@ class Config(dict):
     __getattr__ = dict.__getitem__
 
 
-def collector(enabled=True, rho=0.0):
+def collector(enabled=True, rho=0.0, rollouts=16):
     c = Collector.__new__(Collector)
     c.enabled, c.v2_enabled, c.mode = enabled, True, "online"
     c.online_prefix_strategy = "full_then_ratio"
-    c.main_rollout_n, c.sub_rollout_k = (0, 16) if enabled else (16, 0)
+    c.main_rollout_n, c.sub_rollout_k = (0, rollouts) if enabled else (rollouts, 0)
     c.online_prefix_candidates_per_group = 1
     c.online_prefix_rng = np.random.default_rng(0)
     c.online_prefix_ratio = 0.3
@@ -86,7 +86,7 @@ def collector(enabled=True, rho=0.0):
     c.online_max_prefix_steps = None
     c.online_full_rollout_max_steps = 4
     c.v2_cfg = {"initial_rho": rho, "max_rho": 0.3 if enabled else 0, "alpha": 0.1 if enabled else 0}
-    c.config = Config(env=Config(seed=0, rollout=Config(n=16)), data=Config(train_batch_size=1),
+    c.config = Config(env=Config(seed=0, rollout=Config(n=rollouts)), data=Config(train_batch_size=1),
                       algorithm=Config(filter_groups=Config(enable=False)))
     c.configure_v2(["a", "b", "c"], {i: "family" for i in "abc"}, reset_key="task_id")
     return c
@@ -136,6 +136,7 @@ class RuntimeTests(unittest.TestCase):
         rewards = [worker.step("advance")[1] for _ in range(5)]
         self.assertEqual(rewards, [0, 0, 0, 1, 0])
         self.assertEqual(worker.steps, 4)
+        self.assertFalse(worker.info["truncated"])
 
     def test_prefix_progress_is_not_double_counted(self):
         worker = runtime.TaskWorker("scienceworld", {}, 4, "score", backend=FakeBackend())
@@ -152,6 +153,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(done)
         self.assertFalse(info["won"])
         self.assertEqual(reward, .75)
+        self.assertTrue(info["truncated"])
+        self.assertTrue(worker.step("advance")[3]["truncated"])
+        self.assertFalse(worker.reset("b")[1]["truncated"])
 
     def test_terminal_prefix_rejected(self):
         worker = runtime.TaskWorker("webshop", {}, 4, "score", backend=FakeBackend())
@@ -208,22 +212,74 @@ class RuntimeTests(unittest.TestCase):
 
 
 class CurriculumIntegrationTests(unittest.TestCase):
-    def test_shared_prefix_for_all_16_rollouts(self):
-        c, m = collector(rho=.3), manager()
-        kwargs = c._build_env_kwargs(16)
-        obs, _ = m.reset(kwargs)
-        calls = []
-        c._ensure_online_ready = lambda: None
-        def generate(batch, current_obs, indices):
-            calls.append(list(indices))
-            return ["<action>advance</action>"] * len(indices)
-        c._generate_denoise_actions = generate
-        batch = types.SimpleNamespace(batch=list(range(16)))
-        _, metrics = c._run_full_then_ratio_prefixes(batch, obs, m, kwargs)
-        self.assertEqual(calls, [[0]] * 4)
-        self.assertEqual(list(metrics["denoise_prefix_len"]), [2] * 16)
-        self.assertEqual(m.pre_text_obs, ["state 2"] * 16)
-        self.assertTrue(all(len(history) == 2 for history in m.memory._data))
+    def test_shared_prefix_for_all_configured_rollouts(self):
+        for n in (8, 16):
+            with self.subTest(rollouts=n):
+                c, m = collector(rho=.3, rollouts=n), manager(capacity=n)
+                kwargs = c._build_env_kwargs(n)
+                obs, _ = m.reset(kwargs)
+                calls = []
+                c._ensure_online_ready = lambda: None
+                def generate(batch, current_obs, indices):
+                    calls.append(list(indices))
+                    return ["<action>advance</action>"] * len(indices)
+                c._generate_denoise_actions = generate
+                batch = types.SimpleNamespace(batch=list(range(n)))
+                _, metrics = c._run_full_then_ratio_prefixes(batch, obs, m, kwargs)
+                self.assertEqual(calls, [[0]] * 4)
+                self.assertEqual(list(metrics["denoise_prefix_len"]), [2] * n)
+                self.assertEqual(m.pre_text_obs, ["state 2"] * n)
+                self.assertTrue(all(len(history) == 2 for history in m.memory._data))
+
+    def test_eight_rollout_update_is_per_trajectory_and_rejects_missing_samples(self):
+        for enabled in (True, False):
+            c = collector(enabled, rho=.1 if enabled else 0, rollouts=8)
+            active = c.v2_curriculum.active_problem_ids[0]
+            kwargs = c._build_env_kwargs(8)
+            self.assertEqual([item["task_id"] for item in kwargs], [active] * 8)
+            self.assertEqual([item["denoise_is_sub"] for item in kwargs], [enabled] * 8)
+            # Unequal trajectory lengths must not change the 4/8 success rate.
+            repeats = np.asarray([1, 2, 3, 4, 5, 6, 7, 8])
+            count = int(repeats.sum())
+            batch = types.SimpleNamespace(non_tensor_batch={
+                "traj_uid": np.repeat([f"traj{i}" for i in range(8)], repeats),
+                "denoise_v2_problem_id": np.asarray([active] * count),
+                "denoise_v2_task_type": np.asarray(["family"] * count),
+                "episode_success": np.repeat([1, 1, 1, 1, 0, 0, 0, 0], repeats),
+            })
+            c.after_training_step(batch)
+            self.assertAlmostEqual(c.v2_curriculum.mean_rho(), .075 if enabled else 0)
+            self.assertNotEqual(c.v2_curriculum.active_problem_ids, (active,))
+        c = collector(rollouts=8)
+        active = c.v2_curriculum.active_problem_ids[0]
+        missing = types.SimpleNamespace(non_tensor_batch={
+            "traj_uid": np.asarray([f"traj{i}" for i in range(7)]),
+            "denoise_v2_problem_id": np.asarray([active] * 7),
+            "denoise_v2_task_type": np.asarray(["family"] * 7), "episode_success": np.ones(7),
+        })
+        with self.assertRaisesRegex(ValueError, "exactly 8"):
+            c.after_training_step(missing)
+
+    def test_group_size_checkpoint_compatibility(self):
+        old, new = collector(rollouts=16), collector(rollouts=8)
+        state = old.v2_state_dict()
+        with self.assertRaisesRegex(ValueError, "Rollouts per task differ"):
+            new.load_v2_state_dict(state)
+        del state["rollouts_per_task"]
+        old.load_v2_state_dict(state)  # Legacy 16-sample checkpoints still resume.
+        with self.assertRaisesRegex(ValueError, "Rollouts per task differ"):
+            new.load_v2_state_dict(state)
+        restored = collector(rollouts=8)
+        restored.load_v2_state_dict(new.v2_state_dict())
+        self.assertEqual(restored.v2_state_dict(), new.v2_state_dict())
+
+    def test_invalid_group_layout_rejected(self):
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            collector(rollouts=1)
+        c = collector(rollouts=8)
+        c.main_rollout_n, c.sub_rollout_k = 4, 4
+        with self.assertRaisesRegex(ValueError, "all sharing one prefix"):
+            c.configure_v2(["a"], {"a": "family"})
 
     def test_zero_rho_skips_shadow_and_second_reset(self):
         c, m = collector(), manager()
@@ -475,7 +531,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(baseline[key], denoise[key])
             self.assertIsNone(baseline["env.denoise.online.model_path"])
             self.assertEqual(baseline["env.denoise.v2.max_rho"], 0)
-            self.assertEqual(denoise["env.rollout.n"], 16)
+            self.assertEqual(denoise["env.rollout.n"], 8 if benchmark == "scienceworld" else 16)
             # Denoise uses the shared ALFWorld controller, not benchmark overrides.
             for name in ("initial_rho", "min_rho", "max_rho", "target_accuracy", "alpha"):
                 self.assertNotIn(f"env.denoise.v2.{name}", denoise)
@@ -520,7 +576,7 @@ class LauncherTests(unittest.TestCase):
                         with initialize_config_dir(config_dir=str(ROOT / "recipe/denoise_v2/config"), version_base=None):
                             cfg = compose(config_name="task_suite_trainer", overrides=build_overrides(args))
                             OmegaConf.resolve(cfg)
-                            self.assertEqual(cfg.env.rollout.n, 16)
+                            self.assertEqual(cfg.env.rollout.n, 8 if benchmark == "scienceworld" else 16)
                             self.assertEqual(cfg.env.denoise.enable, method == "denoise" and mode == "train")
                             self.assertEqual(cfg.env.task_suite.benchmark, benchmark)
                             self.assertEqual(cfg.data.train_batch_size, 16)

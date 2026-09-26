@@ -115,11 +115,12 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
             raise ValueError("DenoiseRL v2 requires prefix_strategy='full_then_ratio'.")
 
         total_n = int(self.config.env.rollout.n)
-        expected_layout = (0, 16) if self.enabled else (16, 0)
-        if (self.main_rollout_n, self.sub_rollout_k) != expected_layout or total_n != 16:
+        expected_layout = (0, total_n) if self.enabled else (total_n, 0)
+        if total_n < 2 or (self.main_rollout_n, self.sub_rollout_k) != expected_layout:
             raise ValueError(
-                "Task-pool training requires exactly 16 rollouts per task: "
-                f"expected (main_rollout_n, sub_rollout_k)={expected_layout}, env.rollout.n=16."
+                "Task-pool training requires at least 2 rollouts per task, all clean for baseline "
+                "or all sharing one prefix for denoise: "
+                f"expected (main_rollout_n, sub_rollout_k)={expected_layout}, env.rollout.n={total_n}."
             )
         if self.online_prefix_candidates_per_group != 1:
             raise ValueError(
@@ -172,7 +173,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
             "[denoise v2] fresh-gamefile task-type curriculum enabled: "
             f"pool_size={self.v2_curriculum.pool_size}, "
             f"active_batch_size={self.v2_curriculum.batch_size}, "
-            "noise_rollouts_per_gamefile=16, "
+            f"rollouts_per_gamefile={total_n}, "
             f"task_type_counts={task_type_counts}, "
             f"initial_rho={self.v2_curriculum.initial_rho}, "
             f"rho_range=[{self.v2_curriculum.min_rho}, {self.v2_curriculum.max_rho}], "
@@ -185,6 +186,7 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
         if not self.v2_enabled or self.v2_curriculum is None:
             raise RuntimeError("DenoiseRL v2 curriculum has not been configured.")
         state = self.v2_curriculum.state_dict()
+        state["rollouts_per_task"] = int(self.config.env.rollout.n)
         state["online_prefix_rng_state"] = self.online_prefix_rng.bit_generator.state
         if hasattr(self, "v2_environment_fingerprint"):
             state["environment_fingerprint"] = self.v2_environment_fingerprint
@@ -193,6 +195,9 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
     def load_v2_state_dict(self, state: dict) -> None:
         if not self.v2_enabled or self.v2_curriculum is None:
             raise RuntimeError("DenoiseRL v2 curriculum has not been configured.")
+        # Older checkpoints predate configurable groups and always used 16.
+        if int(state.get("rollouts_per_task", 16)) != int(self.config.env.rollout.n):
+            raise ValueError("Rollouts per task differ from the curriculum checkpoint; use a new experiment name.")
         if hasattr(self, "v2_environment_fingerprint") and state.get("environment_fingerprint") != self.v2_environment_fingerprint:
             raise ValueError("Task data, reward mode or step budget differs from the curriculum checkpoint.")
         self.v2_curriculum.load_state_dict(state)
@@ -1063,6 +1068,15 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
                 for data in total_batch_list[i]:
                     data["episode_success"] = float(episode_success[i])
 
+        if infos and "truncated" in infos[0]:
+            # Task-suite workers retain their final info after termination.
+            # Repeat episode metadata on rows so balancing/filtering cannot
+            # change the episode-weighted cutoff metrics.
+            for rows, info in zip(total_batch_list, infos):
+                for data in rows:
+                    data["episode_truncated"] = bool(info["truncated"])
+                    data["episode_final_score"] = float(info["task_score"])
+
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
 
     def after_training_step(self, batch: DataProto) -> dict[str, float]:
@@ -1111,14 +1125,15 @@ class DenoiseTrajectoryCollector(TrajectoryCollector):
                 "DenoiseRL v2 rollout gamefiles do not match the active pool batch: "
                 f"missing={len(missing_gamefiles)}, unexpected={len(unexpected_gamefiles)}."
             )
+        expected_rollouts = int(self.config.env.rollout.n)
         wrong_counts = {
             gamefile: len(grouped_successes[gamefile])
             for gamefile in active_gamefiles
-            if len(grouped_successes[gamefile]) != 16
+            if len(grouped_successes[gamefile]) != expected_rollouts
         }
         if wrong_counts:
             raise ValueError(
-                "DenoiseRL v2 requires exactly 16 rollout successes per active gamefile; "
+                f"DenoiseRL v2 requires exactly {expected_rollouts} rollout successes per active gamefile; "
                 f"got {wrong_counts}."
             )
 

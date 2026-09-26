@@ -71,8 +71,8 @@ def resolve_checkpoint(path):
 
 def recommended(benchmark):
     # Match ALFWorld's task batch; rho control is inherited from denoise_v2_base.
-    return {"webshop": {"batch": 16, "steps": 15, "history": 2, "prompt": 4096},
-            "scienceworld": {"batch": 16, "steps": 100, "history": 4, "prompt": 8192}}[benchmark]
+    return {"webshop": {"batch": 16, "rollouts": 16, "steps": 15, "history": 2, "prompt": 4096},
+            "scienceworld": {"batch": 16, "rollouts": 8, "steps": 50, "history": 4, "prompt": 8192}}[benchmark]
 
 
 def build_overrides(args):
@@ -90,7 +90,7 @@ def build_overrides(args):
         if path is None:
             return str(Path(model_root or DEFAULT_MODEL_ROOT) / default)
         return str(Path(model_root) / path) if model_root and not Path(path).is_absolute() else path
-    experiment = os.getenv("EXPERIMENT_NAME", f"{args.benchmark}_{args.method}_7b_seed{args.seed}" + ("_swiftsage" if scienceworld else ""))
+    experiment = os.getenv("EXPERIMENT_NAME", f"{args.benchmark}_{args.method}_7b_seed{args.seed}" + ("_swiftsage_n8_t50" if scienceworld else ""))
     values = {
         "data.train_files": str(data_dir / "train.parquet"),
         "data.val_files": str(data_dir / f"{eval_split}.parquet"),
@@ -132,11 +132,11 @@ def build_overrides(args):
         "env.task_suite.eval_split": eval_split,
         "env.task_suite.reward_mode": "score",
         "env.seed": args.seed, "env.max_steps": profile["steps"], "env.history_length": profile["history"],
-        "env.rollout.n": 16,
+        "env.rollout.n": profile["rollouts"],
         "env.resources_per_worker.num_cpus": 0.25,
         "env.denoise.enable": denoise,
-        "env.denoise.main_rollout_n": 0 if denoise else 16,
-        "env.denoise.sub_rollout_k": 16 if denoise else 0,
+        "env.denoise.main_rollout_n": 0 if denoise else profile["rollouts"],
+        "env.denoise.sub_rollout_k": profile["rollouts"] if denoise else 0,
         "env.denoise.v2.enabled": training,
         "env.denoise.v2.shuffle_seed": args.seed,
         "env.denoise.online.model_path": model_path("DENOISE_MODEL_PATH", "Qwen/Qwen2.5-1.5B-Instruct") if denoise else None,
@@ -164,8 +164,8 @@ def build_overrides(args):
             "env.task_suite.eval_protocol": "dev_monitor" if training else protocol,
             "env.task_suite.eval_per_type_limit": 3 if training else ((3 if eval_split == "dev" else 10) if protocol == "swiftsage" else None),
             "env.task_suite.eval_expected_tasks": 270 if not training and eval_split == "test" and protocol == "swiftsage" else None,
-            "env.task_suite.eval_max_steps": 100 if training else 600,
-            "env.task_suite.eval_env_step_limit": 100 if training else 300,
+            "env.task_suite.eval_max_steps": profile["steps"] if training else 600,
+            "env.task_suite.eval_env_step_limit": profile["steps"] if training else 300,
             "env.task_suite.eval_stop_on_stagnation": not training,
             "trainer.val_before_train": not training,
         })

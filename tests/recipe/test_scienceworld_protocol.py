@@ -12,9 +12,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from agent_system.scienceworld_protocol import bounded_chat, render_prompt, score_metrics, select_tasks, task_digest, write_report
+from agent_system.scienceworld_protocol import bounded_chat, render_prompt, score_metrics, select_tasks, task_digest, truncation_metrics, write_report
 from recipe.denoise_v2.task_suite import launch
-from tests.recipe.test_task_suite import backends, runtime, Manager, Config, memory_ns, Collector
+from tests.recipe.test_task_suite import backends, runtime, Manager, Config, memory_ns, Collector, load_definitions, ROOT
 
 
 def values(overrides):
@@ -205,6 +205,7 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(reward, .4)
         self.assertFalse(info["won"])
         self.assertEqual(info["raw_score"], -1)
+        self.assertFalse(info["truncated"])
         self.assertEqual(worker.step("look around")[1], 0)
 
     def test_stagnation_rule_and_disabled_training_rule(self):
@@ -215,6 +216,42 @@ class ScoreTests(unittest.TestCase):
             _, done, info = backend.step("look around")
             self.assertEqual(done, enabled)
             self.assertEqual(info["task_score"], .2)
+            self.assertFalse(info["truncated"])
+
+    def test_native_move_budget_is_distinct_from_success_and_failure(self):
+        for score, truncated in [(40, True), (100, False), (-1, False)]:
+            backend = self.backend([])
+            backend.env.envStepLimit = 300
+            backend.env.step = lambda action: ("obs", 0, True, {"score": score, "moves": 301, "valid": []})
+            _, done, info = backend.step("look around")
+            self.assertTrue(done)
+            self.assertEqual(info["truncated"], truncated)
+
+    def test_truncation_metrics_use_episode_scores(self):
+        self.assertEqual(truncation_metrics([True, False, True], [.5, 1, .3]),
+                         {"truncation_rate": 2 / 3, "truncated_score_mean": 40})
+        self.assertEqual(truncation_metrics([False], [1]), {"truncation_rate": 0})
+
+    def test_training_metrics_count_episodes_not_action_rows(self):
+        import numpy as np
+        import torch
+        ns = load_definitions(ROOT / "verl/trainer/ppo/metric_utils.py", {
+            "np": np, "torch": torch, "deprecated": lambda *args: lambda fn: fn,
+        })
+        batch = SimpleNamespace(batch={
+            "token_level_scores": torch.ones(4, 2), "token_level_rewards": torch.ones(4, 2),
+            "advantages": torch.ones(4, 2), "returns": torch.ones(4, 2),
+            "responses": torch.ones(4, 2), "attention_mask": torch.ones(4, 4),
+        }, non_tensor_batch={
+            "traj_uid": np.asarray(["long", "long", "long", "short"]),
+            "episode_rewards": np.asarray([.4, .4, .4, 1]),
+            "episode_lengths": np.asarray([50, 50, 50, 3]), "tool_callings": np.zeros(4),
+            "episode_truncated": np.asarray([True, True, True, False]),
+            "episode_final_score": np.asarray([.4, .4, .4, 1]),
+        })
+        metrics = ns["compute_data_metrics"](batch, use_critic=False)
+        self.assertEqual(metrics["episode/truncation_rate"], .5)
+        self.assertEqual(metrics["episode/truncated_score_mean"], 40)
 
 
 class LaunchPipelineTests(unittest.TestCase):
@@ -229,6 +266,13 @@ class LaunchPipelineTests(unittest.TestCase):
         self.assertFalse(train["trainer.val_before_train"])
         self.assertEqual(train["env.task_suite.eval_split"], "dev")
         self.assertEqual(train["env.task_suite.eval_per_type_limit"], 3)
+        self.assertEqual(train["data.train_batch_size"], 16)
+        self.assertEqual(train["env.rollout.n"], 8)
+        self.assertEqual(train["env.denoise.main_rollout_n"], 8)
+        self.assertEqual(train["env.denoise.sub_rollout_k"], 0)
+        self.assertEqual(train["env.max_steps"], 50)
+        self.assertEqual(train["env.task_suite.eval_max_steps"], 50)
+        self.assertEqual(train["env.task_suite.eval_env_step_limit"], 50)
         final = values(launch.build_overrides(self.args("eval")))
         self.assertTrue(final["trainer.val_before_train"])
         self.assertEqual(final["env.task_suite.eval_split"], "test")

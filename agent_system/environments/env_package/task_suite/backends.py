@@ -173,6 +173,12 @@ class ScienceWorldBackend:
         self.previous_actions = set(info.get("valid", []))
         normalized = self._info(info)
         normalized["is_action_valid"] = valid
+        # The native wrapper also terminates on its moves budget, before the
+        # outer action budget in long evaluations. Success/failure is terminal,
+        # not a cutoff; stagnation is a separate policy rule.
+        move_limit = getattr(self.env, "envStepLimit", self.options.get("env_step_limit", self.options.get("max_steps", 100)))
+        normalized["truncated"] = bool(done and not stagnant and 0 <= raw_score < 100
+                                       and info.get("moves", 0) > move_limit)
         return obs, bool(done), normalized
 
     def close(self):

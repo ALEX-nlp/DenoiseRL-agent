@@ -15,11 +15,17 @@
 
 | 阶段 | 任务 | 每条轨迹预算 | 用途 |
 |---|---|---|---|
-| 训练 | 官方 train 池 | 100 次动作，含重放前缀 | GRPO / DenoiseRL 更新 |
-| 每 25 个更新监控 | 每类型前 3 个 dev variation，约 90 个 | 100 次动作 / 100 原生 moves | 趋势监控，greedy |
+| 训练 | 官方 train 池，每批 16 个任务、每题 8 条 solver 采样 | 50 次动作，含重放前缀 | GRPO / DenoiseRL 更新 |
+| 每 25 个更新监控 | 每类型前 3 个 dev variation，约 90 个 | 50 次动作 / 50 原生 moves | 趋势监控，greedy |
 | 训练后正式评测 | 每类型前 10 个 test variation，共 270 个 | 600 次动作 / 300 原生 moves，并使用停滞终止规则 | 报告最终结果，greedy |
 
 默认跳过训练前评估；如需要初始基线，可单独运行基础模型评测。训练监控分数受较短预算影响，不应直接与正式 test 分数比较。baseline 与 DenoiseRL 使用相同环境设置、计分和动作格式；`easy` 与末次非负计分同时用于两个方法的训练与评估。原生 reward 在终止时只支付一次；完全成功仍按原生 score=100 统计。
+
+训练预算 `16 × 8 × 50` 参考 [Paying Less Generalization Tax 附录 A.4](https://arxiv.org/html/2601.18217v1#A1.SS4)，用于降低在线训练成本；模型起点和奖励并不完全相同，不保证同样效果。每次更新的 solver 动作上限从原 `16 × 16 × 100 = 25,600` 降为 `6,400`，真实耗时仍受推理和并行效率影响，弱模型生成开销另计。
+
+50 turn 是训练折中，并不足以保证覆盖所有长任务。[SwiftSage Appendix A](https://arxiv.org/html/2305.17390v2#A1) 列出的长任务专家轨迹平均长度可超过 100 步；具体版本、简化设置和策略都会改变动作数。先观察 `episode/truncation_rate` 与 `val/dev/truncation_rate`（0–1）、`truncated_score_mean`（仅存在截断时输出，0–100）及无效动作情况。若大量有效、有进展的轨迹被截断，可在同一固定 dev 集上对比 50/100 步，再决定是否延长训练预算。最终评测仍使用原有 300 moves / 600 动作，避免用短预算冒充正式结果。
+
+截断指标区分预算耗尽与成功、不可恢复失败、停滞终止：只有动作上限或原生 moves 上限结束的未完成轨迹计入截断。重放前缀计入 50 步总预算。成功恰好发生在第 50 步时不计入截断，终止后重复调用不重复计数。各条轨迹等权，长轨迹不会在该指标中得到更多权重。
 
 正式评测会校验实际选中 270 个任务及逐批真实 task ID；不符时直接报错，不能把一个意外缩小的任务集当作完整结果。若要所有原生 test variation，显式传 `--eval-protocol full`，该结果使用单独目录和 run 名。自动最终评测使用本次成功保存的**最终** checkpoint，不利用 test 选择模型，也不读取旧 tracker 猜测训练是否完成。
 
@@ -27,10 +33,10 @@
 
 ```bash
 # 更新服务器代码后，使用新实验名启动。需要已有模型、环境和 tasks.json。
-EXPERIMENT_NAME=scienceworld_baseline_7b_seed0_swiftsage \
+EXPERIMENT_NAME=scienceworld_baseline_7b_seed0_swiftsage_n8_t50 \
   bash recipe/denoise_v2/run_scienceworld_grpo_train.sh
 
-EXPERIMENT_NAME=scienceworld_denoise_7b_seed0_swiftsage \
+EXPERIMENT_NAME=scienceworld_denoise_7b_seed0_swiftsage_n8_t50 \
   bash recipe/denoise_v2/run_scienceworld_denoise_train.sh
 
 # 单独正式评估基础模型，或已保存的 checkpoint。
@@ -58,4 +64,4 @@ ScienceWorld 在作业环境有 `WANDB_API_KEY`、`WANDB_IDENTITY_TOKEN_FILE` �
 
 prompt 改用原生有限动作模板与当前状态，不再展开上千个对象/动作组合。超过 token 预算先移除最早的历史，始终保留任务、当前状态和动作格式；这些必要内容本身超长则明确报错，避免悄悄从左侧截掉任务。
 
-这些调整减少训练期间评测负担，不能保证一个 7B 多轮任务瞬间完成。仍使用原有 FSDP/vLLM 权重同步和批处理实现；CPU/JVM 数量、模型逐动作生成和任务长度仍影响耗时。已启动的旧服务器进程不会热更新，需同步代码后重新启动。旧环境/计分/prompt 的 curriculum checkpoint 与新指纹不兼容，应使用新实验名重训；仅做独立 checkpoint 评测不需要 curriculum 状态。
+这些调整减少训练期间评测负担，不能保证一个 7B 多轮任务瞬间完成。仍使用原有 FSDP/vLLM 权重同步和批处理实现；CPU/JVM 数量、模型逐动作生成和任务长度仍影响耗时。已启动的旧服务器进程不会热更新，需同步代码后重新启动。旧采样数或环境/动作预算/计分/prompt 的 curriculum checkpoint 与新配置不兼容，应使用新实验名重训；仅做独立 checkpoint 评测不需要 curriculum 状态。

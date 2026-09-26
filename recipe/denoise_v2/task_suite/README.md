@@ -4,12 +4,12 @@
 
 ## 方法与实验口径
 
-- baseline 是 **GRPO**：每个任务 16 条从初始状态开始的轨迹，不加载弱模型。
-- DenoiseRL v2：每个任务至多生成一条弱模型轨迹，16 条 solver 续接共用截断前缀；`rho=0` 跳过弱模型生成。
+- baseline 是 **GRPO**：每个任务从初始状态独立采样，ScienceWorld 默认 8 条、WebShop 默认 16 条，不加载弱模型。
+- DenoiseRL v2：每个任务至多生成一条弱模型轨迹，该任务的所有 solver 续接共用截断前缀；ScienceWorld 默认 8 条、WebShop 默认 16 条；`rho=0` 跳过弱模型生成。
 - 两者使用相同的无放回任务遍历、rollout 数、solver、reward、prompt、训练步数和评估协议。baseline 的 `rho` 固定为 0，但仍保存任务遍历状态。
 - WebShop 用具体 **goal index** 定位任务，默认按购买选项数与属性要求数划分六组共享 rho，也可选择按商品大类分组；ScienceWorld 用 **task name::variation ID** 定位任务，按 task name 共享 rho。
 - WebShop 固定 catalog seed=42，所有 worker、train/dev/test 使用同一目标目录；训练随机种子只影响采样顺序。改变 catalog seed 会改变任务定义/顺序和数据划分，不能当作普通训练随机种子。
-- `rho <- clip(rho + alpha * (本批该类型完全成功率 - target), 0, max_rho)`。先对 16 条轨迹求成功率，再对同类型任务等权平均；不使用部分得分更新 rho。
+- `rho <- clip(rho + alpha * (本批该类型完全成功率 - target), 0, max_rho)`。先对该任务的所有采样轨迹求成功率，再对同类型任务等权平均；不使用部分得分更新 rho。
 - 在线模式沿用 ALFWorld v2：**没有筛掉弱模型的成功轨迹**，所以前缀可能包含错误，也可能包含有效进展。
 - 前缀动作重放进环境和历史；只有 solver 新动作参与 PPO。前缀消耗环境步数预算，遇到终止状态的前缀会报错；相同 task/prefix 返回不同状态也会报错。
 - 两个方法都使用一次性的 **terminal score reward**：WebShop 为原生 0–1 得分；ScienceWorld 默认采用 SwiftSage 的末次非负分数，除以 100。不可恢复失败保留失败前的进度，完全成功仍要求原生 score=100。中间步骤 reward=0，避免重复累加进度。该定义会奖励继承前缀后最终达到的部分进度。
@@ -48,9 +48,9 @@ ScienceWorld 的分组对应任务行为类型。WebShop 默认使用 `--webshop
 | 参数 | WebShop baseline / denoise | ScienceWorld baseline / denoise |
 |---|---:|---:|
 | task batch size | 16 / 16 | 16 / 16 |
-| 每任务 solver rollout | 16 / 16 | 16 / 16 |
-| solver 轨迹 / step | 256 / 256 | 256 / 256 |
-| 最大环境动作数（含前缀） | 15 | 100 |
+| 每任务 solver rollout | 16 / 16 | 8 / 8 |
+| solver 轨迹 / step | 256 / 256 | 128 / 128 |
+| 最大环境动作数（含前缀） | 15 | 50 |
 | history length | 2 | 4 |
 | prompt / response tokens | 4096 / 256 | 8192 / 256 |
 | learning rate | 1e-6 | 1e-6 |
@@ -71,11 +71,11 @@ ScienceWorld 的分组对应任务行为类型。WebShop 默认使用 `--webshop
 | 正式 test | 全量 500 个 | 每类型前 10 个 variation，共 270 个 |
 | 正式 test 动作 / 原生 moves 上限 | 15 / — | 600 / 300 |
 
-这里 PPO mini batch 的单位是 collector 展开的动作行，不是完整轨迹。500 steps 是初次实验预算，不保证收敛。ScienceWorld 的训练/dev 监控预算为 100 次动作，只用于观察训练趋势；正式 test 使用较长预算，二者分开记录。完整参考协议、来源和所有原生 test variation 的可选评估见 [ScienceWorld 评测协议](SCIENCEWORLD_EVALUATION.md)。
+这里 PPO mini batch 的单位是 collector 展开的动作行，不是完整轨迹。500 steps 是初次实验预算，不保证收敛。ScienceWorld 的训练/dev 监控预算为 50 次动作，只用于观察训练趋势；正式 test 使用较长预算，二者分开记录。50 步可能截断长任务，新增 `episode/truncation_rate`、`val/dev/truncation_rate` 和截断轨迹均分用于排查；不应仅凭截断率认定增加 turn 就能成功。完整参考协议、来源和所有原生 test variation 的可选评估见 [ScienceWorld 评测协议](SCIENCEWORLD_EVALUATION.md)。
 
-三个环境统一使用每批 16 个具体任务、每任务 16 条 rollout。DenoiseRL 的 initial_rho=0、min_rho=0、max_rho=0.5、target_accuracy=0.75、alpha=0.2；baseline 固定 rho=0。ScienceWorld 仅保留适合长任务的步数预算和历史长度。若 rho 长期为 0，应先检查对应任务类型的完全成功率。
+三个环境默认每批 16 个具体任务；ScienceWorld 每题采样 8 条，ALFWorld/WebShop 保持 16 条。DenoiseRL 的 initial_rho=0、min_rho=0、max_rho=0.5、target_accuracy=0.75、alpha=0.2；baseline 固定 rho=0。采样数由 `env.rollout.n` 控制，并要求 baseline 的 `main_rollout_n` 或 denoise 的 `sub_rollout_k` 与之相等；`actor_rollout_ref.rollout.n` 保持 1。若 rho 长期为 0，应先检查对应任务类型的完全成功率。
 
-WebShop 每 16 个逻辑环境共用一个 Ray actor 内的商品库/搜索索引，浏览器 session 分离；16 个训练任务对应 16 份商品库，而非 256 份。ScienceWorld 每条轨迹仍有独立 JVM（默认 256 个训练 JVM＋8 个验证 JVM）。CPU/RAM 受限时，把两个方法的 `TRAIN_BATCH_SIZE` 一起调小，并重新生成对应大小的 train.parquet。
+WebShop 每 16 个逻辑环境共用一个 Ray actor 内的商品库/搜索索引，浏览器 session 分离；16 个训练任务对应 16 份商品库，而非 256 份。ScienceWorld 每条轨迹仍有独立 JVM（默认 128 个训练 JVM＋8 个验证 JVM）。CPU/RAM 受限时，把两个方法的 `TRAIN_BATCH_SIZE` 一起调小，并重新生成对应大小的 train.parquet。
 
 ## 安装与任务清单
 
@@ -212,7 +212,7 @@ bash recipe/denoise_v2/run_webshop_denoise_train.sh \
   trainer.val_before_train=False trainer.test_freq=-1 trainer.save_freq=1
 ```
 
-`--dry-run` 输出最终参数列表，不启动 Ray 或加载数据，不执行 Hydra 解析。ScienceWorld 自动检查作业环境里的 `WANDB_API_KEY`、`WANDB_IDENTITY_TOKEN_FILE` 或当前 W&B 主机的 netrc 登录：有凭据默认 online，没有则提示并使用 offline，保留指标且不因缺少登录中断训练。这里只检查凭据是否存在，不校验网络或服务端权限。WebShop 默认 offline；显式 `WANDB_MODE` 优先。通过其他 SDK 设置保存凭据时，可显式设 `WANDB_MODE=online`。checkpoint 自动恢复默认开启；重做实验应使用新的 `EXPERIMENT_NAME` 或传 `trainer.resume_mode=disable`。ScienceWorld 新默认实验名带 `_swiftsage` 后缀，避免误接旧配置；prompt、简化设置和计分变化也会改变恢复指纹。恢复训练需要 `denoise_v2_curriculum.json`，其中记录任务顺序、rho、随机状态和环境指纹。
+`--dry-run` 输出最终参数列表，不启动 Ray 或加载数据，不执行 Hydra 解析。ScienceWorld 自动检查作业环境里的 `WANDB_API_KEY`、`WANDB_IDENTITY_TOKEN_FILE` 或当前 W&B 主机的 netrc 登录：有凭据默认 online，没有则提示并使用 offline，保留指标且不因缺少登录中断训练。这里只检查凭据是否存在，不校验网络或服务端权限。WebShop 默认 offline；显式 `WANDB_MODE` 优先。通过其他 SDK 设置保存凭据时，可显式设 `WANDB_MODE=online`。checkpoint 自动恢复默认开启；重做实验应使用新的 `EXPERIMENT_NAME` 或传 `trainer.resume_mode=disable`。ScienceWorld 新默认实验名带 `_swiftsage_n8_t50` 后缀，避免误接旧配置；若命令显式设置了 `EXPERIMENT_NAME`，也应换成新名字。恢复训练会检查每题采样数，以及包含动作预算、prompt、简化设置和计分的环境指纹。恢复训练需要 `denoise_v2_curriculum.json`，其中记录任务顺序、rho、随机状态、采样数和环境指纹。
 
 ScienceWorld 训练结束自动保存最终 checkpoint（即使关闭周期保存），随后独立运行正式 test。短训练 smoke test 加 `--skip-final-eval` 可跳过这一阶段。默认每个训练更新记录 `episode/reward/mean`、`episode/success_rate` 等；dev/test 中每批输出完成数、均分和 ETA，并更新本地 `progress.json` 与 W&B summary。一次训练更新本身仍需完成多步 rollout 和 PPO，因此不会每个环境动作都出现一个训练指标点。
 
@@ -230,7 +230,7 @@ bash recipe/denoise_v2/run_webshop_eval.sh \
   --checkpoint checkpoints/denoise_v2_webshop/webshop_denoise_7b_seed0 \
   --eval-split test
 bash recipe/denoise_v2/run_scienceworld_eval.sh \
-  --checkpoint checkpoints/denoise_v2_scienceworld/scienceworld_denoise_7b_seed0_swiftsage \
+  --checkpoint checkpoints/denoise_v2_scienceworld/scienceworld_denoise_7b_seed0_swiftsage_n8_t50 \
   --eval-split test
 ```
 

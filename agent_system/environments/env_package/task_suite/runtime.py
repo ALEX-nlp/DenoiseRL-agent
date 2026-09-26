@@ -46,6 +46,7 @@ class TaskWorker:
         if self.info["task_id"] != self.task_id:
             raise RuntimeError("Simulator reset returned a different task")
         self.steps, self.done = 0, False
+        self.info["truncated"] = False
         history = []
         for action in prefix_actions:
             history.append({"text_obs": self.obs, "action": action})
@@ -64,6 +65,7 @@ class TaskWorker:
         if self.info["task_id"] != self.task_id:
             raise RuntimeError("Simulator changed task identity during rollout")
         self.steps += 1
+        self.info["truncated"] = bool(self.info.get("truncated", False) or (not terminal and self.steps >= self.max_steps))
         self.done = terminal or self.steps >= self.max_steps
         score = float(self.info["task_score"])
         if not math.isfinite(score) or not 0 <= score <= 1:

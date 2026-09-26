@@ -288,6 +288,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         #     batch.non_tensor_batch["tool_callings"][unique_idx].min().item(),
         **({f"episode/{k}": v[0].item() for k, v in batch.non_tensor_batch.items() if "success_rate" in k}),
     }
+    if "episode_truncated" in batch.non_tensor_batch:
+        from agent_system.scienceworld_protocol import truncation_metrics
+        cutoff_metrics = truncation_metrics(
+            batch.non_tensor_batch["episode_truncated"][unique_idx],
+            batch.non_tensor_batch["episode_final_score"][unique_idx],
+        )
+        metrics.update({f"episode/{key}": value for key, value in cutoff_metrics.items()})
     _add_denoise_metrics(metrics, batch, unique_idx)
     return metrics
 

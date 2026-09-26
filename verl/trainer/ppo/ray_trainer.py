@@ -733,9 +733,10 @@ class RayPPOTrainer:
         scienceworld_validation = task_suite_validation and self.config.env.task_suite.benchmark == "scienceworld"
         evaluation_started = time.monotonic()
         native_scores = []
+        episode_truncated = []
         invalid_actions, action_count = 0, 0
         if scienceworld_validation:
-            from agent_system.scienceworld_protocol import score_metrics, task_digest, write_report
+            from agent_system.scienceworld_protocol import score_metrics, task_digest, truncation_metrics, write_report
             vector = val_envs.envs
             val_data_dir = self.config.trainer.get("validation_data_dir")
             report_dir = os.path.join(val_data_dir, split_name) if val_data_dir and split_name else val_data_dir
@@ -906,6 +907,9 @@ class RayPPOTrainer:
                             for uid, score in zip(test_batch.non_tensor_batch["traj_uid"], test_batch.non_tensor_batch["task_score"]):
                                 final_scores[uid] = float(score)
                             native_scores.extend(final_scores[uid] for uid in ordered_batch_traj_uids)
+                            cutoff_by_uid = dict(zip(test_batch.non_tensor_batch["traj_uid"],
+                                                     test_batch.non_tensor_batch["episode_truncated"]))
+                            episode_truncated.extend(bool(cutoff_by_uid[uid]) for uid in ordered_batch_traj_uids)
                     else:
                         observed_validation_gamefiles.extend(item["validation_gamefile"] for item in validation_env_kwargs)
                 # success rate
@@ -933,6 +937,7 @@ class RayPPOTrainer:
                     elapsed = time.monotonic() - evaluation_started
                     eta = elapsed * (sample_limit - processed_samples) / processed_samples
                     partial_metrics = score_metrics(observed_validation_gamefiles, native_scores, vector.task_types)
+                    partial_metrics.update(truncation_metrics(episode_truncated, native_scores))
                     report.update({"completed_episodes": len(native_scores), "elapsed_seconds": elapsed,
                                    "eta_seconds": eta, "metrics": partial_metrics,
                                    "invalid_action_rate": invalid_actions / max(action_count, 1)})
@@ -940,6 +945,7 @@ class RayPPOTrainer:
                         write_report(report_dir, self.global_steps, report)
                     print(f"[validation/{split_name}] {processed_samples}/{sample_limit} tasks; "
                           f"score={partial_metrics['score']:.2f}/100; elapsed={elapsed / 60:.1f} min; "
+                          f"truncated={partial_metrics['truncation_rate']:.1%}; "
                           f"ETA={eta / 60:.1f} min", flush=True)
                     tracker = getattr(self, "_tracking_logger", None)
                     wandb_logger = tracker.logger.get("wandb") if tracker is not None else None
@@ -951,6 +957,7 @@ class RayPPOTrainer:
                             f"eval_progress/{split_name}/total_tasks": sample_limit,
                             f"eval_progress/{split_name}/eta_seconds": eta,
                             f"eval_progress/{split_name}/partial_score": partial_metrics["score"],
+                            f"eval_progress/{split_name}/truncation_rate": partial_metrics["truncation_rate"],
                         })
 
             if sample_limit is not None and processed_samples >= sample_limit:
@@ -1043,13 +1050,14 @@ class RayPPOTrainer:
 
         if scienceworld_validation:
             scienceworld_metrics = score_metrics(observed_validation_gamefiles, native_scores, vector.task_types)
+            scienceworld_metrics.update(truncation_metrics(episode_truncated, native_scores))
             metric_dict.update({f"val/{key}": value for key, value in scienceworld_metrics.items()})
             metric_dict["val/invalid_action_rate"] = invalid_actions / max(action_count, 1)
             report.update({"complete": True, "eta_seconds": 0,
                            "elapsed_seconds": time.monotonic() - evaluation_started,
                            "metrics": {key.removeprefix("val/"): float(value) for key, value in metric_dict.items()},
-                           "episodes": [{"task_id": task_id, "score": 100 * score}
-                                        for task_id, score in zip(observed_validation_gamefiles, native_scores)]})
+                           "episodes": [{"task_id": task_id, "score": 100 * score, "truncated": truncated}
+                                        for task_id, score, truncated in zip(observed_validation_gamefiles, native_scores, episode_truncated)]})
             if report_dir:
                 write_report(report_dir, self.global_steps, report)
 
