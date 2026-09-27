@@ -16,6 +16,7 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import logging
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -51,7 +52,21 @@ class Tracking:
         if "tracking" in default_backend or "wandb" in default_backend:
             import wandb
 
-            wandb.init(project=project_name, name=experiment_name, config=config)
+            try:
+                wandb.init(project=project_name, name=experiment_name, config=config)
+            except wandb.errors.UsageError as exc:
+                # Authentication can differ between the launcher and a Ray worker.
+                # Let the SDK try all credential sources before falling back, and
+                # only recover from missing credentials, not other W&B errors.
+                message = str(exc).lower()
+                if not any(text in message for text in ("no api key configured", "api_key not configured", "api key not configured")):
+                    raise
+                logging.getLogger(__name__).warning(
+                    "W&B has no API key in this worker; saving metrics offline so training can continue. "
+                    "Live web charts will not update. Configure WANDB_API_KEY or run wandb login in the job environment "
+                    "to enable online logging; upload this run later with wandb sync."
+                )
+                wandb.init(project=project_name, name=experiment_name, config=config, mode="offline")
             self.logger["wandb"] = wandb
 
         if "mlflow" in default_backend:

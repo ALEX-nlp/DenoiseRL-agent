@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 
 from agent_system.scienceworld_protocol import bounded_chat, render_prompt, score_metrics, select_tasks, task_digest, truncation_metrics, write_report
 from recipe.denoise_v2.task_suite import launch
-from tests.recipe.test_task_suite import backends, runtime, Manager, Config, memory_ns, Collector, load_definitions, ROOT
+from tests.recipe.test_task_suite import backends, runtime, Manager, Config, manager_ns, memory_ns, Collector, load_definitions, ROOT
 
 
 def values(overrides):
@@ -195,6 +195,35 @@ class ScoreTests(unittest.TestCase):
         backend.options = {"stop_on_stagnation": stagnant}
         return backend
 
+    def test_success_reward_excludes_partial_credit_but_preserves_evaluation_score(self):
+        for scores, limit, final_score, won, truncated in (
+            ([40, -1], 5, .4, False, False),
+            ([40, 60], 2, .6, False, True),
+            ([40, 100], 2, 1.0, True, False),
+            ([100], 5, 1.0, True, False),
+        ):
+            for mode in ("success", "score"):
+                with self.subTest(scores=scores, mode=mode):
+                    backend = self.backend([])
+                    sequence = iter(scores)
+                    def step(action):
+                        score = next(sequence)
+                        return "obs", 0, score < 0 or score >= 100, {"score": score, "valid": ["look around"]}
+                    backend.env.step = step
+                    worker = runtime.TaskWorker("scienceworld", {}, limit, mode, backend=backend)
+                    worker.task_id, worker.done, worker.steps = "type::0", False, 0
+                    for _ in scores[:-1]:
+                        _, reward, done, _ = worker.step("look around")
+                        self.assertEqual(reward, 0)
+                        self.assertFalse(done)
+                    _, reward, done, info = worker.step("look around")
+                    self.assertTrue(done)
+                    self.assertEqual(reward, float(won) if mode == "success" else final_score)
+                    self.assertEqual(info["task_score"], final_score)
+                    self.assertEqual(info["won"], won)
+                    self.assertEqual(info["truncated"], truncated)
+                    self.assertEqual(worker.step("look around")[1], 0)
+
     def test_irrecoverable_failure_retains_last_not_best_score(self):
         backend = self.backend([60, 40, -1])
         worker = runtime.TaskWorker("scienceworld", {}, 10, "score", backend=backend)
@@ -286,6 +315,27 @@ class LaunchPipelineTests(unittest.TestCase):
             launch.build_overrides(self.args(eval_split="test"))
 
     @unittest.skipUnless(importlib.util.find_spec("hydra"), "Hydra is an optional test dependency")
+    def test_training_success_reward_does_not_replace_dev_or_test_score(self):
+        from hydra import compose, initialize_config_dir
+
+        for method in ("baseline", "denoise"):
+            for mode, split in (("train", "dev"), ("eval", "dev"), ("eval", "test")):
+                with self.subTest(method=method, mode=mode, split=split):
+                    overrides = launch.build_overrides(self.args(mode, method=method, eval_split=split))
+                    with initialize_config_dir(config_dir=str(ROOT / "recipe/denoise_v2/config"), version_base=None):
+                        config = compose(config_name="task_suite_trainer", overrides=overrides)
+                    vector = Mock()
+                    with patch.dict(manager_ns, {"load_manifest": lambda *args: {}, "RayTaskEnvs": vector}):
+                        _, validation = manager_ns["make_task_envs"](config)
+                    train_call, val_call = vector.call_args_list
+                    self.assertEqual(train_call.args[5], "success" if mode == "train" else "score")
+                    self.assertEqual(train_call.kwargs["success_reward"], 1.0)
+                    self.assertEqual(val_call.args[1], split)
+                    self.assertEqual(val_call.args[5], "score")
+                    self.assertEqual(val_call.kwargs["success_reward"], 1.0)
+                    self.assertEqual(set(validation), {split})
+
+    @unittest.skipUnless(importlib.util.find_spec("hydra"), "Hydra is an optional test dependency")
     def test_dev_and_standalone_eval_use_fixed_sampling(self):
         from hydra import compose, initialize_config_dir
         from omegaconf import OmegaConf
@@ -333,6 +383,7 @@ class LaunchPipelineTests(unittest.TestCase):
                         self.assertEqual(actual, {"do_sample": True, "temperature": 0.5 if custom else 0.6,
                                                   "top_p": 0.95, "top_k": -1, "n": 1})
                         self.assertEqual(config.env.task_suite.eval_split, "test")
+                        self.assertEqual(config.env.task_suite.reward_mode, "score")
 
     def test_success_runs_final_saved_checkpoint_and_failure_never_runs_test(self):
         with tempfile.TemporaryDirectory() as directory:

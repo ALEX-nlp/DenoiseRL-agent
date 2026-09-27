@@ -173,6 +173,8 @@ def build_overrides(args):
     if scienceworld:
         protocol = getattr(args, "eval_protocol", "swiftsage")
         values.update({
+            "env.task_suite.reward_mode": "success" if training else "score",
+            "env.task_suite.success_reward": 1.0,
             "actor_rollout_ref.rollout.val_kwargs.do_sample": True,
             "actor_rollout_ref.rollout.val_kwargs.temperature": 0.6,
             "actor_rollout_ref.rollout.val_kwargs.top_p": 0.95,

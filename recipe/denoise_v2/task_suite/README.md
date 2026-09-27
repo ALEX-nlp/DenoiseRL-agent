@@ -13,7 +13,7 @@
 - 在线模式沿用 ALFWorld v2：**没有筛掉弱模型的成功轨迹**，所以前缀可能包含错误，也可能包含有效进展。
 - 前缀动作重放进环境和历史；只有 solver 新动作参与 PPO。前缀消耗环境步数预算，遇到终止状态的前缀会报错；相同 task/prefix 返回不同状态也会报错。
 - 两个方法的 WebShop 训练奖励对齐 GiGPO：**终止时完全成功给 10，失败（含部分得分和超时）给 0**，中间步骤为 0。配置为 `reward_mode=success`、`success_reward=10`；无效输出格式惩罚系数保持 0.1。评测环境始终返回原生 0–1 得分，单独统计完全成功率，避免把 10 倍成功率当作原生 score。
-- ScienceWorld 的一次性 terminal reward 保持不变：默认采用 SwiftSage 的末次非负分数，除以 100；不可恢复失败保留失败前的进度，完全成功仍要求原生 score=100。`env.task_suite.reward_mode=success` 可切换为成功奖励（`success_reward` 默认 1）；比较两个方法时须使用相同设置。
+- ScienceWorld 的训练环境奖励为：终止时完全成功给 1，失败、部分完成或超时给 0，中间步骤为 0；配置为 `reward_mode=success`、`success_reward=1`，baseline 与 DenoiseRL 一致。完全成功仍要求原生 score=100，现有无效动作惩罚独立保留。dev/test 始终使用末次非负分数除以 100 作为评测环境返回值，继续报告原生 `score`、`score_macro` 和完全成功率；部分进度仅用于评测及诊断，不作为默认训练奖励。
 - WebShop 使用 GiGPO 的 `WEBSHOP_TEMPLATE` / `WEBSHOP_TEMPLATE_NO_HIS`、观测分段加引号、最近两步历史及 13000 字符历史回退。复用 `webshop_projection`：动作转小写，解析首个 `<action>` 块，格式有效性要求 `<think>` 标签且不含中文；是否在当前可用动作中不另算格式惩罚。solver、弱模型和评测使用同一协议。
 - WebShop 训练集保持 `[1500, n)`，test 保持完整 `[0,500)`；已有 dev `[500,1500)` 保留在 manifest 中但默认不使用，也不并入训练集。ScienceWorld 直接使用官方 `get_variations_train/dev/test()`，不随机重划。
 - WebShop 训练前、每 25 步和独立评测默认遍历完整 500 条 test。ScienceWorld 仍只用 dev 做训练监控：默认跳过初始评估，每 25 步评估固定小 dev 集，训练成功后自动用最终 checkpoint 跑 SwiftSage 270-task test。所有评估断言实际 task ID、数量、重复次数与选定任务集一致，从干净初始状态开始，不需要弱模型或 curriculum 文件。
@@ -216,6 +216,8 @@ bash recipe/denoise_v2/run_webshop_denoise_train.sh \
 ```
 
 `--dry-run` 输出最终参数列表，不启动 Ray 或加载数据，不执行 Hydra 解析。ScienceWorld 自动检查作业环境里的 `WANDB_API_KEY`、`WANDB_IDENTITY_TOKEN_FILE` 或当前 W&B 主机的 netrc 登录：有凭据默认 online，没有则提示并使用 offline，保留指标且不因缺少登录中断训练。这里只检查凭据是否存在，不校验网络或服务端权限。WebShop 默认 offline；显式 `WANDB_MODE` 优先。通过其他 SDK 设置保存凭据时，可显式设 `WANDB_MODE=online`。checkpoint 自动恢复默认开启；重做实验应使用新的 `EXPERIMENT_NAME` 或传 `trainer.resume_mode=disable`。ScienceWorld 新默认实验名带 `_swiftsage_n8_t50` 后缀，避免误接旧配置；若命令显式设置了 `EXPERIMENT_NAME`，也应换成新名字。恢复训练会检查每题采样数，以及包含动作预算、prompt、简化设置和计分的环境指纹。恢复训练需要 `denoise_v2_curriculum.json`，其中记录任务顺序、rho、随机状态、采样数和环境指纹。
+
+如果设置了 `WANDB_MODE=online`，但实际训练 worker 的 W&B 初始化报 `No API key configured`（或旧版 `api_key not configured`），日志组件会打印提示并改用 offline 继续训练，保留相同的 project、experiment 和 config；其他 W&B 错误仍正常抛出。离线指标不会实时显示在网页上，登录后可用 `wandb sync /path/to/wandb/offline-run-...` 上传。需要实时曲线时，应在实际作业环境配置 `WANDB_API_KEY` 或运行 `wandb login`；浏览器登录不能替代计算节点的 SDK 登录。
 
 WebShop baseline / DenoiseRL 默认启用 `trainer.keep_latest_and_best=True`：每次保存完成后，仅保留最新 checkpoint 和评测成功率最高的 checkpoint；二者相同时只保留一份。默认选择指标为 `val/test/success_rate`（`trainer.best_checkpoint_metric`），严格提升才更换最优，并列保留较早的 checkpoint。训练前 step 0 的评测也参与选择。周期保存仍每 25 steps 一次；即使保存与评测间隔不同，新的最优也会立即保存；最终 step 始终保存。关闭评测则只能保留最新，无法选择最优。
 

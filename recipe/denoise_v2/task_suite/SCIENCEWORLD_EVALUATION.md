@@ -21,7 +21,7 @@
 
 ScienceWorld 的 dev、独立评测和自动最终 test 默认使用 `do_sample=true`、`temperature=0.6`、`top_p=0.95`、`top_k=-1`，每任务评测一次（`val_kwargs.n=1`）。训练 rollout 保持自己的采样参数。显式传入 `actor_rollout_ref.rollout.val_kwargs.*` 可以调整评测参数，自动最终 test 会保留这些覆盖值。评测报告的 `sampling` 字段保存实际参数。采样评测与旧的 greedy 结果应分别标注，方法间比较使用相同采样参数。
 
-默认跳过训练前评估；如需要初始基线，可单独运行基础模型评测。训练监控分数受较短预算影响，不应直接与正式 test 分数比较。baseline 与 DenoiseRL 使用相同环境设置、计分和动作格式；`easy` 与末次非负计分同时用于两个方法的训练与评估。原生 reward 在终止时只支付一次；完全成功仍按原生 score=100 统计。
+默认跳过训练前评估；如需要初始基线，可单独运行基础模型评测。训练监控分数受较短预算影响，不应直接与正式 test 分数比较。baseline 与 DenoiseRL 使用相同环境设置和动作格式，均启用 `easy`。训练环境默认 `reward_mode=success`、`success_reward=1`：终止时完全成功给 1，失败、部分完成或预算耗尽给 0，中间步骤为 0，终止后不重复支付。完全成功按原生 score=100 判定，现有无效动作惩罚独立保留。末次非负进度分数保存在 info 中供诊断；dev/test 环境始终使用该分数除以 100 作为评测返回值，继续报告 `score`、`score_macro` 和完全成功率。
 
 训练预算 `16 × 8 × 50` 参考 [Paying Less Generalization Tax 附录 A.4](https://arxiv.org/html/2601.18217v1#A1.SS4)，用于降低在线训练成本；模型起点和奖励并不完全相同，不保证同样效果。每次更新的 solver 动作上限从原 `16 × 16 × 100 = 25,600` 降为 `6,400`，真实耗时仍受推理和并行效率影响，弱模型生成开销另计。
 

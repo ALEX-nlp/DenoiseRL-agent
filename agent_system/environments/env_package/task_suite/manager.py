@@ -163,7 +163,7 @@ def make_task_envs(config):
             manifest, split, capacity, resources,
             (suite.get("eval_max_steps") or config.env.max_steps) if validation else config.env.max_steps,
             # Evaluation reports native mean score independently of training reward scale.
-            "score" if validation and suite.benchmark == "webshop" else suite.reward_mode,
+            "score" if validation else suite.reward_mode,
             success_reward=suite.get("success_reward", 1.0) if not validation else 1.0,
             per_type_limit=suite.get("eval_per_type_limit") if validation else None,
             expected_tasks=suite.get("eval_expected_tasks") if validation else None,
