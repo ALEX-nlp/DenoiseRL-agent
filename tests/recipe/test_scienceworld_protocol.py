@@ -2,6 +2,7 @@
 
 from collections import Counter
 from contextlib import redirect_stdout
+import importlib.util
 import io
 import json
 from pathlib import Path
@@ -283,6 +284,55 @@ class LaunchPipelineTests(unittest.TestCase):
         self.assertIsNone(full["env.task_suite.eval_per_type_limit"])
         with self.assertRaisesRegex(ValueError, "reserved"):
             launch.build_overrides(self.args(eval_split="test"))
+
+    @unittest.skipUnless(importlib.util.find_spec("hydra"), "Hydra is an optional test dependency")
+    def test_dev_and_standalone_eval_use_fixed_sampling(self):
+        from hydra import compose, initialize_config_dir
+        from omegaconf import OmegaConf
+
+        for method in ("baseline", "denoise"):
+            for mode, split in (("train", "dev"), ("eval", "dev"), ("eval", "test")):
+                for sampling in (
+                    {"do_sample": True, "temperature": 1.0, "top_p": 1.0, "top_k": -1},
+                    {"do_sample": True, "temperature": 0.7, "top_p": 0.9, "top_k": 40},
+                    {"do_sample": False, "temperature": 0.0, "top_p": 1.0, "top_k": -1},
+                ):
+                    with self.subTest(method=method, mode=mode, split=split, sampling=sampling):
+                        overrides = launch.build_overrides(self.args(mode, method=method, eval_split=split))
+                        overrides += [f"actor_rollout_ref.rollout.{key}={json.dumps(value)}"
+                                      for key, value in sampling.items()]
+                        with initialize_config_dir(config_dir=str(ROOT / "recipe/denoise_v2/config"), version_base=None):
+                            config = compose(config_name="task_suite_trainer", overrides=overrides)
+                        actual = OmegaConf.to_container(config.actor_rollout_ref.rollout.val_kwargs, resolve=True)
+                        self.assertEqual(actual, {"do_sample": True, "temperature": 0.6,
+                                                  "top_p": 0.95, "top_k": -1, "n": 1})
+                        rollout = config.actor_rollout_ref.rollout
+                        self.assertEqual({key: rollout[key] for key in sampling}, sampling)
+
+    @unittest.skipUnless(importlib.util.find_spec("hydra"), "Hydra is an optional test dependency")
+    def test_automatic_final_test_preserves_evaluation_sampling(self):
+        from hydra import compose, initialize_config_dir
+        from omegaconf import OmegaConf
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "global_step_2"
+            (checkpoint / "actor").mkdir(parents=True)
+            completion = {"checkpoint": str(checkpoint), "manifest_path": directory + "/tasks.json",
+                          "experiment_name": "trained", "validation_data_dir": directory + "/validation"}
+            sampling = {"do_sample": True, "temperature": 0.65, "top_p": 0.85, "top_k": 32}
+            overrides = launch.build_overrides(self.args())
+            overrides += [f"actor_rollout_ref.rollout.{key}={json.dumps(value)}"
+                          for key, value in sampling.items()]
+            for protocol in ("swiftsage", "full"):
+                for custom in ([], ["actor_rollout_ref.rollout.val_kwargs.temperature=0.5"]):
+                    with self.subTest(protocol=protocol, custom=custom):
+                        final = overrides + custom + launch.final_evaluation_overrides(completion, protocol)
+                        with initialize_config_dir(config_dir=str(ROOT / "recipe/denoise_v2/config"), version_base=None):
+                            config = compose(config_name="task_suite_trainer", overrides=final)
+                        actual = OmegaConf.to_container(config.actor_rollout_ref.rollout.val_kwargs, resolve=True)
+                        self.assertEqual(actual, {"do_sample": True, "temperature": 0.5 if custom else 0.6,
+                                                  "top_p": 0.95, "top_k": -1, "n": 1})
+                        self.assertEqual(config.env.task_suite.eval_split, "test")
 
     def test_success_runs_final_saved_checkpoint_and_failure_never_runs_test(self):
         with tempfile.TemporaryDirectory() as directory:

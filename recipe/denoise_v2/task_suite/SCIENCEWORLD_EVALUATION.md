@@ -16,8 +16,10 @@
 | 阶段 | 任务 | 每条轨迹预算 | 用途 |
 |---|---|---|---|
 | 训练 | 官方 train 池，每批 16 个任务、每题 8 条 solver 采样 | 50 次动作，含重放前缀 | GRPO / DenoiseRL 更新 |
-| 每 25 个更新监控 | 每类型前 3 个 dev variation，约 90 个 | 50 次动作 / 50 原生 moves | 趋势监控，greedy |
-| 训练后正式评测 | 每类型前 10 个 test variation，共 270 个 | 600 次动作 / 300 原生 moves，并使用停滞终止规则 | 报告最终结果，greedy |
+| 每 25 个更新监控 | 每类型前 3 个 dev variation，约 90 个 | 50 次动作 / 50 原生 moves | 趋势监控，temperature=0.6、top_p=0.95 |
+| 训练后正式评测 | 每类型前 10 个 test variation，共 270 个 | 600 次动作 / 300 原生 moves，并使用停滞终止规则 | 报告最终结果，temperature=0.6、top_p=0.95 |
+
+ScienceWorld 的 dev、独立评测和自动最终 test 默认使用 `do_sample=true`、`temperature=0.6`、`top_p=0.95`、`top_k=-1`，每任务评测一次（`val_kwargs.n=1`）。训练 rollout 保持自己的采样参数。显式传入 `actor_rollout_ref.rollout.val_kwargs.*` 可以调整评测参数，自动最终 test 会保留这些覆盖值。评测报告的 `sampling` 字段保存实际参数。采样评测与旧的 greedy 结果应分别标注，方法间比较使用相同采样参数。
 
 默认跳过训练前评估；如需要初始基线，可单独运行基础模型评测。训练监控分数受较短预算影响，不应直接与正式 test 分数比较。baseline 与 DenoiseRL 使用相同环境设置、计分和动作格式；`easy` 与末次非负计分同时用于两个方法的训练与评估。原生 reward 在终止时只支付一次；完全成功仍按原生 score=100 统计。
 

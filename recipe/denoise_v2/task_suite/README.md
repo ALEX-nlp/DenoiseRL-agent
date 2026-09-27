@@ -12,10 +12,11 @@
 - `rho <- clip(rho + alpha * (本批该类型完全成功率 - target), 0, max_rho)`。先对该任务的所有采样轨迹求成功率，再对同类型任务等权平均；不使用部分得分更新 rho。
 - 在线模式沿用 ALFWorld v2：**没有筛掉弱模型的成功轨迹**，所以前缀可能包含错误，也可能包含有效进展。
 - 前缀动作重放进环境和历史；只有 solver 新动作参与 PPO。前缀消耗环境步数预算，遇到终止状态的前缀会报错；相同 task/prefix 返回不同状态也会报错。
-- 两个方法都使用一次性的 **terminal score reward**：WebShop 为原生 0–1 得分；ScienceWorld 默认采用 SwiftSage 的末次非负分数，除以 100。不可恢复失败保留失败前的进度，完全成功仍要求原生 score=100。中间步骤 reward=0，避免重复累加进度。该定义会奖励继承前缀后最终达到的部分进度。
-- 完全成功独立统计：WebShop score=1，ScienceWorld score=100。`env.task_suite.reward_mode=success` 可改为纯二值 reward；做比较时两组都要改。
-- WebShop 新划分为 train `[1500, n)`、dev `[500,1500)`、test `[0,500)`，与 bundled upstream baseline 一致；不同于旧环境 wrapper 的 train `[500,n)`。ScienceWorld 直接使用官方 `get_variations_train/dev/test()`，不随机重划。
-- 训练中只评估 dev。ScienceWorld 默认跳过初始评估，每 25 步评估固定小 dev 集，训练成功后自动用最终 checkpoint 跑 SwiftSage 270-task test；WebShop 保持全量评估。所有评估断言实际 task ID、数量、重复次数与选定任务集一致，从干净初始状态开始，不需要弱模型或 curriculum 文件。
+- 两个方法的 WebShop 训练奖励对齐 GiGPO：**终止时完全成功给 10，失败（含部分得分和超时）给 0**，中间步骤为 0。配置为 `reward_mode=success`、`success_reward=10`；无效输出格式惩罚系数保持 0.1。评测环境始终返回原生 0–1 得分，单独统计完全成功率，避免把 10 倍成功率当作原生 score。
+- ScienceWorld 的一次性 terminal reward 保持不变：默认采用 SwiftSage 的末次非负分数，除以 100；不可恢复失败保留失败前的进度，完全成功仍要求原生 score=100。`env.task_suite.reward_mode=success` 可切换为成功奖励（`success_reward` 默认 1）；比较两个方法时须使用相同设置。
+- WebShop 使用 GiGPO 的 `WEBSHOP_TEMPLATE` / `WEBSHOP_TEMPLATE_NO_HIS`、观测分段加引号、最近两步历史及 13000 字符历史回退。复用 `webshop_projection`：动作转小写，解析首个 `<action>` 块，格式有效性要求 `<think>` 标签且不含中文；是否在当前可用动作中不另算格式惩罚。solver、弱模型和评测使用同一协议。
+- WebShop 训练集保持 `[1500, n)`，test 保持完整 `[0,500)`；已有 dev `[500,1500)` 保留在 manifest 中但默认不使用，也不并入训练集。ScienceWorld 直接使用官方 `get_variations_train/dev/test()`，不随机重划。
+- WebShop 训练前、每 25 步和独立评测默认遍历完整 500 条 test。ScienceWorld 仍只用 dev 做训练监控：默认跳过初始评估，每 25 步评估固定小 dev 集，训练成功后自动用最终 checkpoint 跑 SwiftSage 270-task test。所有评估断言实际 task ID、数量、重复次数与选定任务集一致，从干净初始状态开始，不需要弱模型或 curriculum 文件。
 
 ## rho 分组的含义
 
@@ -58,20 +59,22 @@ ScienceWorld 的分组对应任务行为类型。WebShop 默认使用 `--webshop
 | PPO mini / micro per GPU | 128 / 4 | 128 / 4 |
 | rollout TP | 2 | 2 |
 | 训练 temperature / top-p | 1.0 / 1.0 | 1.0 / 1.0 |
-| 评估 | greedy，n=1 | greedy，n=1 |
-| 训练 steps / dev 间隔 | 500 / 25 | 500 / 25 |
+| 评估 | temperature=0.6、top_p=0.95，n=1 | temperature=0.6、top_p=0.95，n=1 |
+| 训练 steps / 评测间隔 | 500 / 25 | 500 / 25 |
 | 初始 rho | 0 / 0 | 0 / 0 |
 | rho 范围 | 固定 0 / [0, 0.5] | 固定 0 / [0, 0.5] |
 | rho alpha | 0 / 0.2 | 0 / 0.2 |
 | target success | — / 0.75 | — / 0.75 |
 | solver / weak vLLM memory fraction | 0.5 / 0.2（仅 denoise） | 0.5 / 0.2（仅 denoise） |
 | 并行评估任务 | 16 | 8 |
-| 训练前评估 | 全量 dev | 默认跳过 |
-| 训练中 dev 集 | 全量 | 每类型前 3 个 variation，约 90 个 |
+| 训练前评估 | 全量 test，500 个 | 默认跳过 |
+| 训练中评估 | 全量 test，500 个 | dev 每类型前 3 个 variation，约 90 个 |
 | 正式 test | 全量 500 个 | 每类型前 10 个 variation，共 270 个 |
 | 正式 test 动作 / 原生 moves 上限 | 15 / — | 600 / 300 |
 
 这里 PPO mini batch 的单位是 collector 展开的动作行，不是完整轨迹。500 steps 是初次实验预算，不保证收敛。ScienceWorld 的训练/dev 监控预算为 50 次动作，只用于观察训练趋势；正式 test 使用较长预算，二者分开记录。50 步可能截断长任务，新增 `episode/truncation_rate`、`val/dev/truncation_rate` 和截断轨迹均分用于排查；不应仅凭截断率认定增加 turn 就能成功。完整参考协议、来源和所有原生 test variation 的可选评估见 [ScienceWorld 评测协议](SCIENCEWORLD_EVALUATION.md)。
+
+ScienceWorld 的训练中 dev、独立评测和自动最终 test 默认使用 `do_sample=true`、`temperature=0.6`、`top_p=0.95`、`top_k=-1`，与训练 rollout 采样参数分别配置。可用 `actor_rollout_ref.rollout.val_kwargs.*` 显式覆盖评测参数；自动最终 test 保留这些覆盖值。
 
 三个环境默认每批 16 个具体任务；ScienceWorld 每题采样 8 条，ALFWorld/WebShop 保持 16 条。DenoiseRL 的 initial_rho=0、min_rho=0、max_rho=0.5、target_accuracy=0.75、alpha=0.2；baseline 固定 rho=0。采样数由 `env.rollout.n` 控制，并要求 baseline 的 `main_rollout_n` 或 denoise 的 `sub_rollout_k` 与之相等；`actor_rollout_ref.rollout.n` 保持 1。若 rho 长期为 0，应先检查对应任务类型的完全成功率。
 
@@ -214,9 +217,17 @@ bash recipe/denoise_v2/run_webshop_denoise_train.sh \
 
 `--dry-run` 输出最终参数列表，不启动 Ray 或加载数据，不执行 Hydra 解析。ScienceWorld 自动检查作业环境里的 `WANDB_API_KEY`、`WANDB_IDENTITY_TOKEN_FILE` 或当前 W&B 主机的 netrc 登录：有凭据默认 online，没有则提示并使用 offline，保留指标且不因缺少登录中断训练。这里只检查凭据是否存在，不校验网络或服务端权限。WebShop 默认 offline；显式 `WANDB_MODE` 优先。通过其他 SDK 设置保存凭据时，可显式设 `WANDB_MODE=online`。checkpoint 自动恢复默认开启；重做实验应使用新的 `EXPERIMENT_NAME` 或传 `trainer.resume_mode=disable`。ScienceWorld 新默认实验名带 `_swiftsage_n8_t50` 后缀，避免误接旧配置；若命令显式设置了 `EXPERIMENT_NAME`，也应换成新名字。恢复训练会检查每题采样数，以及包含动作预算、prompt、简化设置和计分的环境指纹。恢复训练需要 `denoise_v2_curriculum.json`，其中记录任务顺序、rho、随机状态、采样数和环境指纹。
 
+WebShop baseline / DenoiseRL 默认启用 `trainer.keep_latest_and_best=True`：每次保存完成后，仅保留最新 checkpoint 和评测成功率最高的 checkpoint；二者相同时只保留一份。默认选择指标为 `val/test/success_rate`（`trainer.best_checkpoint_metric`），严格提升才更换最优，并列保留较早的 checkpoint。训练前 step 0 的评测也参与选择。周期保存仍每 25 steps 一次；即使保存与评测间隔不同，新的最优也会立即保存；最终 step 始终保存。关闭评测则只能保留最新，无法选择最优。
+
+保留的是完整 `global_step_N` 目录，包括模型、优化器、dataloader 和 curriculum 状态。新 checkpoint 完整保存后才清理旧目录；该策略会接管 actor/critic 的 FIFO 清理，不能用 `max_actor_ckpt_to_keep=2` 替代。保存期间可短暂同时存在三份。实验目录中的 `latest_checkpointed_iteration.txt` 和 `best_checkpointed_iteration.txt` 分别记录最新、最优 step，`checkpoint_retention.json` 保存选择指标和最优分数，续训自动读取。独立评估最优模型时，将 `--checkpoint` 指向该 step 的 `global_step_N` 目录；传实验根目录仍表示最新。此策略适用于共享本地文件系统；从头重跑须用空的新实验目录，恢复已有实验用 `trainer.resume_mode=auto`。
+
 ScienceWorld 训练结束自动保存最终 checkpoint（即使关闭周期保存），随后独立运行正式 test。短训练 smoke test 加 `--skip-final-eval` 可跳过这一阶段。默认每个训练更新记录 `episode/reward/mean`、`episode/success_rate` 等；dev/test 中每批输出完成数、均分和 ETA，并更新本地 `progress.json` 与 W&B summary。一次训练更新本身仍需完成多步 rollout 和 PPO，因此不会每个环境动作都出现一个训练指标点。
 
 ## 评估
+
+WebShop 的训练中验证和独立评估默认使用完整 500 条 test，无需指定 `--eval-split`；每条任务评估一次，最后一批不足 16 条也会评完。采样参数为 `do_sample=True`、`temperature=0.6`、`top_p=0.95`、`top_k=-1`、`val_kwargs.n=1`。这些参数独立于训练 rollout 配置；如需覆盖，使用 `actor_rollout_ref.rollout.val_kwargs.<参数名>=<值>`，并对 baseline 和 Denoise 使用相同设置。旧的 greedy/dev 结果与新的采样/test 结果应区分记录；若根据多轮 test 选最佳 checkpoint，报告时应注明选择方式。
+
+奖励和 prompt 变更会改变 WebShop 训练环境指纹，旧 curriculum 检查点不能直接续接；新训练使用新的 `EXPERIMENT_NAME`。原有模型 checkpoint 仍可通过独立评估入口评测，但采用的是这里的新 prompt／采样协议。正在运行的作业不会自动切换到新设置。
 
 ```bash
 # 基础模型（不允许缺少 checkpoint 时默默回退）
@@ -234,7 +245,7 @@ bash recipe/denoise_v2/run_scienceworld_eval.sh \
   --eval-split test
 ```
 
-`--checkpoint` 接受实验根目录、`global_step_N` 或其 `actor` 子目录。ScienceWorld 单独评估默认 test；`--eval-protocol full` 可遍历原生 split 的全部 variation。指标包括 `val/test/success_rate`（完全成功）、`val/test/test_score`（0–1 reward）及选定任务集的 `task_coverage=1`。ScienceWorld 新增 `val/test/score_macro`（类型等权，0–100）、`val/test/score`（episode 等权，0–100）、各类型分数和无效动作率；覆盖率不等于原生 split 全量覆盖，报告同时记录两种任务数。
+`--checkpoint` 接受实验根目录、`global_step_N` 或其 `actor` 子目录。ScienceWorld 单独评估默认 test；`--eval-protocol full` 可遍历原生 split 的全部 variation。指标包括 `val/test/success_rate`（完全成功率，汇报准确率时乘 100%）、`val/test/test_score`（原生归一化平均得分 0–1，WebShop 不受训练成功奖励 10 的尺度影响）及选定任务集的 `task_coverage=1`。ScienceWorld 新增 `val/test/score_macro`（类型等权，0–100）、`val/test/score`（episode 等权，0–100）、各类型分数和无效动作率；覆盖率不等于原生 split 全量覆盖，报告同时记录两种任务数。
 
 rollout 和 validation JSONL 位于 `recipe/denoise_v2/dumps/<experiment>/`；validation 每行是一条折叠后的 solver 轨迹，包含实际 `task_id`。ScienceWorld 同时保存 `<step>.summary.json`；自动最终评测位于 `validation/final_swiftsage/test/`，W&B 使用独立的 `<experiment>_test_swiftsage` run。最终比较建议使用同一 manifest、相同种子集合，报告 SR、score、solver tokens、弱模型 tokens、环境交互数与墙钟时间；相同训练 steps 并不代表 DenoiseRL 的总计算量与 baseline 相同。
 
@@ -245,7 +256,8 @@ CPU 契约测试覆盖固定任务、跨 split 去重、共享前缀、零 rho �
 ```bash
 python -m unittest tests.recipe.test_task_suite tests.recipe.test_denoise_v2 \
   tests.recipe.test_denoise_v2_efficiency tests.recipe.test_alfworld_exhaustive_validation \
-  tests.recipe.test_task_suite_environment tests.recipe.test_scienceworld_protocol
+  tests.recipe.test_task_suite_environment tests.recipe.test_scienceworld_protocol \
+  tests.recipe.test_checkpoint_retention
 ```
 
 这些测试使用模拟 backend，不能替代上面的真实环境 smoke test 或 GPU 训练。推荐参数不是已经复现出的 benchmark 最优参数。

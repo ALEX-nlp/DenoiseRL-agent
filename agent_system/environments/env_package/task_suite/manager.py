@@ -5,6 +5,7 @@ import numpy as np
 
 from agent_system.environments.base import EnvironmentManagerBase
 from agent_system.memory import SimpleMemory
+from agent_system.environments.prompts.webshop import WEBSHOP_TEMPLATE, WEBSHOP_TEMPLATE_NO_HIS
 from .runtime import RayTaskEnvs, load_manifest
 from agent_system.scienceworld_protocol import render_prompt
 
@@ -19,9 +20,16 @@ def project_actions(text_actions):
     return actions, valids
 
 
+def project_webshop_actions(text_actions):
+    # The legacy WebShop package also imports Gym; keep it out of ScienceWorld.
+    from agent_system.environments.env_package.webshop.projection import webshop_projection
+    return webshop_projection(text_actions)
+
+
 class TaskEnvironmentManager(EnvironmentManagerBase):
     def __init__(self, envs, config):
-        super().__init__(envs, project_actions, config)
+        projection = project_webshop_actions if config.env.task_suite.benchmark == "webshop" else project_actions
+        super().__init__(envs, projection, config)
         self.memory = SimpleMemory()
 
     def _observations(self):
@@ -62,19 +70,30 @@ class TaskEnvironmentManager(EnvironmentManagerBase):
         obs, infos = self.envs.reset(kwargs)
         self._verify_shared_states(obs, infos, [[] for _ in obs])
         self.pre_text_obs, self.infos = list(obs), list(infos)
+        if self.config.env.task_suite.benchmark == "webshop":
+            self.webshop_tasks = []
+            for observation, info in zip(obs, infos):
+                parts = observation.split(" [SEP] ")
+                self.webshop_tasks.append(parts[2] if len(parts) > 2 and parts[1] == "Instruction:"
+                                          else info["task_description"])
         self.memory.reset(len(obs))
         self.memory.keys = ["text_obs", "action"]
         self.finished = [False] * len(obs)
         return self._observations(), infos
 
     def step_selected(self, indices, text_actions):
-        actions, valids = project_actions(text_actions)
+        # The upstream WebShop projection mutates its input; preserve raw model outputs.
+        actions, valids = self.projection_f(list(text_actions))
         obs, rewards, dones, infos = self.envs.step_selected(indices, actions)
         for j, i in enumerate(indices):
             if not self.finished[i]:
                 self.memory._data[i].append({"text_obs": self.pre_text_obs[i], "action": actions[j]})
             self.pre_text_obs[i], self.infos[i] = obs[j], infos[j]
-            infos[j]["is_action_valid"] = bool(valids[j] and infos[j].get("is_action_valid", True))
+            if self.config.env.task_suite.benchmark == "webshop":
+                # GiGPO penalizes response-format violations, not action availability.
+                infos[j]["is_action_valid"] = bool(valids[j])
+            else:
+                infos[j]["is_action_valid"] = bool(valids[j] and infos[j].get("is_action_valid", True))
             self.finished[i] = bool(dones[j])
         return self._observations(), np.asarray(rewards, dtype=np.float32), np.asarray(dones), infos
 
@@ -100,18 +119,28 @@ class TaskEnvironmentManager(EnvironmentManagerBase):
         history_length = int(self.config.env.history_length)
         prompts = []
         for i, (obs, info) in enumerate(zip(self.pre_text_obs, self.infos)):
+            # Match the original GiGPO WebShop templates and observation formatting.
+            # Store raw observations for deterministic replay; format only for the prompt.
+            task = self.webshop_tasks[i]
+            def format_obs(raw):
+                pieces = raw.split(" [SEP] ")
+                if task in pieces:
+                    return " [SEP] ".join(f"'{p}'" for p in pieces[pieces.index(task) + 1:])
+                return raw
             history = self.memory._data[i][-history_length:] if history_length > 0 else []
-            history_text = "\n".join(f"Observation: {h['text_obs']}\nAction: {h['action']}" for h in history)
-            state = "\n".join(s for s in (obs, info.get("look", ""), info.get("inventory", "")) if s)
-            actions = "\n".join(info["admissible_actions"])
-            prompts.append(
-                f"You are an agent in {self.config.env.task_suite.benchmark}.\n"
-                f"Task: {info['task_description']}\n"
-                f"Actions already taken: {len(self.memory._data[i])}\n"
-                f"Recent history:\n{history_text}\nCurrent observation:\n{state}\n"
-                f"Available actions (replace placeholders where present):\n{actions}\n"
-                "Briefly reason inside <think>...</think>, then output exactly one action inside <action>...</action>."
+            actions = ["search[<your query>]" if a == "search[<query>]" else a for a in info["admissible_actions"]]
+            fields = dict(task_description=task, current_observation=format_obs(obs),
+                          available_actions="\n".join(f"'{a}'," for a in actions))
+            step_count = len(self.memory._data[i])
+            history_text = "\n".join(
+                f"[Observation {number}: '{format_obs(h['text_obs'])}', Action {number}: '{h['action']}']"
+                for number, h in enumerate(history, start=step_count - len(history) + 1)
             )
+            prompt = WEBSHOP_TEMPLATE.format(**fields, step_count=step_count, history_length=len(history),
+                                             action_history=history_text, current_step=step_count + 1) if history else ""
+            if not prompt or len(prompt) > 13000:
+                prompt = WEBSHOP_TEMPLATE_NO_HIS.format(**fields)
+            prompts.append(prompt)
         return prompts
 
     def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
@@ -133,7 +162,9 @@ def make_task_envs(config):
         vector = RayTaskEnvs(
             manifest, split, capacity, resources,
             (suite.get("eval_max_steps") or config.env.max_steps) if validation else config.env.max_steps,
-            suite.reward_mode,
+            # Evaluation reports native mean score independently of training reward scale.
+            "score" if validation and suite.benchmark == "webshop" else suite.reward_mode,
+            success_reward=suite.get("success_reward", 1.0) if not validation else 1.0,
             per_type_limit=suite.get("eval_per_type_limit") if validation else None,
             expected_tasks=suite.get("eval_expected_tasks") if validation else None,
             backend_overrides={key: value for key, value in {
@@ -142,7 +173,7 @@ def make_task_envs(config):
                 "prompt_version": 2,
                 "env_step_limit": suite.get("eval_env_step_limit") if validation else None,
                 "stop_on_stagnation": suite.get("eval_stop_on_stagnation", False) if validation else False,
-            }.items() if value is not None} if suite.benchmark == "scienceworld" else None,
+            }.items() if value is not None} if suite.benchmark == "scienceworld" else {"prompt_version": "gigpo"},
         )
         if validation:
             vector.eval_protocol = suite.get("eval_protocol", "full")

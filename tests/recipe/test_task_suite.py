@@ -45,6 +45,9 @@ def load_module(name, path):
 
 backends = load_module(package.__name__ + ".backends", PACKAGE / "backends.py")
 runtime = load_module(package.__name__ + ".runtime", PACKAGE / "runtime.py")
+webshop_projection = load_module("agent_system.environments.env_package.webshop.projection",
+                                 PACKAGE.parent / "webshop/projection.py").webshop_projection
+webshop_prompts = load_module("_test_webshop_prompts", ROOT / "agent_system/environments/prompts/webshop.py")
 
 
 def load_definitions(path, namespace):
@@ -62,6 +65,8 @@ memory_ns = load_definitions(ROOT / "agent_system/memory/memory.py", {"BaseMemor
 manager_ns = load_definitions(PACKAGE / "manager.py", {
     "EnvironmentManagerBase": base_ns["EnvironmentManagerBase"], "SimpleMemory": memory_ns["SimpleMemory"],
     "np": np, "re": __import__("re"), "render_prompt": render_prompt,
+    "WEBSHOP_TEMPLATE": webshop_prompts.WEBSHOP_TEMPLATE,
+    "WEBSHOP_TEMPLATE_NO_HIS": webshop_prompts.WEBSHOP_TEMPLATE_NO_HIS,
 })
 Manager = manager_ns["TaskEnvironmentManager"]
 Collector = load_definitions(ROOT / "recipe/denoise_v2/collector.py", {
@@ -130,6 +135,17 @@ def manager(capacity=16, max_steps=4):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_webshop_binary_training_reward_preserves_native_score(self):
+        for max_steps, expected in ((4, [0, 0, 0, 10, 0]), (3, [0, 0, 0, 0])):
+            with self.subTest(max_steps=max_steps):
+                worker = runtime.TaskWorker("webshop", {}, max_steps, "success", backend=FakeBackend(), success_reward=10)
+                worker.reset("a")
+                self.assertEqual([worker.step("advance")[1] for _ in range(max_steps + 1)], expected)
+                self.assertEqual(worker.info["task_score"], max_steps / 4)
+        # Replay uses the same total budget and cannot pay prefix progress twice.
+        worker.reset("a", ["advance", "advance"])
+        self.assertEqual(worker.step("advance")[1], 0)
+
     def test_terminal_score_paid_once_and_done_is_absorbing(self):
         worker = runtime.TaskWorker("webshop", {}, 4, "score", backend=FakeBackend())
         worker.reset("a")
@@ -178,7 +194,7 @@ class RuntimeTests(unittest.TestCase):
         obs, infos = m.reset_selected_with_prefixes([0], [["advance", "advance"]])
         self.assertEqual(m.pre_text_obs, ["state 2", "initial"])
         self.assertEqual([len(h) for h in m.memory._data], [2, 0])
-        self.assertIn("Actions already taken: 2", obs["text"][0])
+        self.assertIn("already taken 2 step(s)", obs["text"][0])
         self.assertEqual(infos[0]["task_id"], "a")
         m.reset_selected_with_prefixes([], [])
         with self.assertRaisesRegex(ValueError, "split"):
@@ -190,6 +206,54 @@ class RuntimeTests(unittest.TestCase):
             "<action>look</action><action>move</action>", "bad"])
         self.assertEqual(actions[0], "focus on Red Box")
         self.assertEqual(valid, [True, False, False])
+
+    def test_webshop_uses_upstream_projection_without_mutating_responses(self):
+        m = manager(5)
+        m.reset([{"task_id": "a"}] * 5)
+        outputs = ["<think>Choose</think><action>click[RED Box]</action>",
+                   "<action>advance</action>", "<think>中文</think><action>advance</action>",
+                   "<think>x</think><action>first</action><action>second</action>", "malformed response without tags"]
+        original = list(outputs)
+        # As in GiGPO, validity concerns model format, independent of native action legality.
+        for slot in m.envs.workers[0].target.slots:
+            backend = slot.backend
+            native_info = backend.info
+            backend.info = lambda native_info=native_info: {**native_info(), "is_action_valid": False}
+        _, _, _, infos = m.step(outputs)
+        self.assertEqual(outputs, original)
+        self.assertEqual([h[-1]["action"] for h in m.memory._data],
+                         ["click[red box]", "advance", "advance", "first", original[-1][-20:]])
+        self.assertEqual([i["is_action_valid"] for i in infos], [True, False, False, True, False])
+
+    def test_webshop_prompt_matches_gigpo_with_replay_history_and_length_fallback(self):
+        m = manager(1)
+        m.reset([{"task_id": "a"}])
+        task = "buy a red mug"
+        raw = lambda page: f"WebShop [SEP] Instruction: [SEP] {task} [SEP] {page}"
+        m.pre_text_obs = [raw("Search")]
+        m.webshop_tasks = [task]
+        m.infos[0]["admissible_actions"] = ["search[<query>]", "click[Search]"]
+        initial = webshop_prompts.WEBSHOP_TEMPLATE_NO_HIS.format(
+            task_description=task, current_observation="'Search'",
+            available_actions="'search[<your query>]',\n'click[Search]',")
+        self.assertEqual(m.build_mixed_text_obs_after_prefix()[0], initial)
+        m.memory._data[0] = [{"text_obs": raw(page), "action": action} for page, action in
+                             [("Search", "search[mug]"), ("Results", "click[item]"), ("Item", "click[red]")]]
+        m.pre_text_obs = [raw("Item [SEP] Red selected")]
+        expected = webshop_prompts.WEBSHOP_TEMPLATE.format(
+            task_description=task, current_observation="'Item' [SEP] 'Red selected'",
+            available_actions="'search[<your query>]',\n'click[Search]',", step_count=3,
+            history_length=2, current_step=4,
+            action_history="[Observation 2: ''Results'', Action 2: 'click[item]']\n"
+                           "[Observation 3: ''Item'', Action 3: 'click[red]']")
+        self.assertEqual(m.build_mixed_text_obs_after_prefix()[0], expected)
+        m.memory._data[0][-1]["text_obs"] = "x" * 14000
+        prompt = m.build_mixed_text_obs_after_prefix()[0]
+        self.assertNotIn("Prior to this step", prompt)
+        self.assertIn("'Red selected'", prompt)
+        # Terminal screens can omit the task; retain the task extracted at reset.
+        m.pre_text_obs = ["Your score (min 0.0, max 1.0): 1.0"]
+        self.assertIn(f"Your task is to: {task}.", m.build_mixed_text_obs_after_prefix()[0])
 
     def test_selected_dispatch_preserves_order_across_actor_groups(self):
         m = manager(4)
@@ -323,6 +387,15 @@ class CurriculumIntegrationTests(unittest.TestCase):
         validate_gamefile_coverage(("a", "b"), ["a", "b", "a", "b"], repeats=2)
         with self.assertRaises(RuntimeError):
             validate_gamefile_coverage(("a", "b"), ["a", "a"], repeats=1)
+
+    def test_full_webshop_test_covers_all_500_tasks_including_last_four(self):
+        task_ids = tuple(str(i) for i in range(500))
+        batches = [build_gamefile_reset_kwargs(task_ids, start=start, count=min(16, 500 - start),
+                                               repeats=1, reset_key="task_id") for start in range(0, 500, 16)]
+        self.assertEqual(len(batches[-1]), 4)
+        visited = [item["task_id"] for batch in batches for item in batch]
+        self.assertEqual(visited, list(task_ids))
+        validate_gamefile_coverage(task_ids, visited, repeats=1)
 
 
 class NativeAdapterTests(unittest.TestCase):
@@ -519,9 +592,45 @@ class PreparationTests(unittest.TestCase):
 class LauncherTests(unittest.TestCase):
     def args(self, benchmark="webshop", method="baseline", mode="train", **extra):
         return types.SimpleNamespace(benchmark=benchmark, method=method, mode=mode, data_dir=None,
-                                     seed=0, eval_split="dev", checkpoint=None, base_model=False, **extra)
+                                     seed=0, eval_split=None, checkpoint=None, base_model=False, **extra)
     def values(self, args):
         return {key: json.loads(value) for key, value in (arg.split("=", 1) for arg in build_overrides(args))}
+
+    def test_webshop_defaults_to_full_test_and_gigpo_training_reward(self):
+        for method in ("baseline", "denoise"):
+            for mode in ("train", "eval"):
+                args = self.args(method=method, mode=mode)
+                args.base_model = True
+                values = self.values(args)
+                self.assertEqual(values["env.task_suite.eval_split"], "test")
+                self.assertEqual(values["env.task_suite.eval_expected_tasks"], 500)
+                self.assertTrue(values["data.val_files"].endswith("/test.parquet"))
+                self.assertTrue(values["data.train_files"].endswith("/train.parquet"))
+                self.assertEqual(values["env.task_suite.reward_mode"], "success" if mode == "train" else "score")
+                self.assertEqual(values["env.task_suite.success_reward"], 10)
+                self.assertEqual(values["trainer.keep_latest_and_best"], mode == "train")
+                self.assertEqual(values["trainer.best_checkpoint_metric"], "val/test/success_rate")
+
+    @unittest.skipUnless(importlib.util.find_spec("hydra"), "Hydra is an optional test dependency")
+    def test_webshop_validation_keeps_native_score_reward_and_full_task_pool(self):
+        from hydra import compose, initialize_config_dir
+        with initialize_config_dir(config_dir=str(ROOT / "recipe/denoise_v2/config"), version_base=None):
+            cfg = compose(config_name="task_suite_trainer", overrides=build_overrides(self.args()))
+        with patch.dict(manager_ns, {"load_manifest": lambda *args: {}, "RayTaskEnvs": unittest.mock.Mock()}):
+            train, val = manager_ns["make_task_envs"](cfg)
+            train_call, val_call = manager_ns["RayTaskEnvs"].call_args_list
+        self.assertEqual(train_call.args[1], "train")
+        self.assertEqual(train_call.args[5], "success")
+        self.assertEqual(train_call.kwargs["success_reward"], 10)
+        self.assertEqual(val_call.args[1], "test")
+        self.assertEqual(val_call.args[5], "score")
+        self.assertIsNone(val_call.kwargs["per_type_limit"])
+        self.assertEqual(val_call.kwargs["expected_tasks"], 500)
+        self.assertEqual(set(val), {"test"})
+        # Native partial credit is still the reported validation score, despite reward=0 in training.
+        worker = runtime.TaskWorker("webshop", {}, 3, val_call.args[5], backend=FakeBackend())
+        worker.reset("a")
+        self.assertEqual(sum(worker.step("advance")[1] for _ in range(3)), .75)
     def test_baseline_and_denoise_have_equal_rollout_and_reward_budgets(self):
         for benchmark in ("webshop", "scienceworld"):
             baseline = self.values(self.args(benchmark))
@@ -580,11 +689,41 @@ class LauncherTests(unittest.TestCase):
                             self.assertEqual(cfg.env.denoise.enable, method == "denoise" and mode == "train")
                             self.assertEqual(cfg.env.task_suite.benchmark, benchmark)
                             self.assertEqual(cfg.data.train_batch_size, 16)
+                            if benchmark == "webshop":
+                                sampling = cfg.actor_rollout_ref.rollout.val_kwargs
+                                self.assertTrue(sampling.do_sample)
+                                self.assertEqual(sampling.temperature, 0.6)
+                                self.assertEqual(sampling.top_p, 0.95)
+                                self.assertEqual(sampling.top_k, -1)
                             if method == "denoise" and mode == "train":
                                 for name in ("initial_rho", "min_rho", "max_rho", "target_accuracy", "alpha"):
                                     self.assertEqual(cfg.env.denoise.v2[name], alfworld.env.denoise.v2[name])
         finally:
             os.chdir(old_cwd)
+
+    @unittest.skipUnless(importlib.util.find_spec("hydra"), "Hydra is an optional test dependency")
+    def test_webshop_eval_is_independent_of_training_sampling_overrides(self):
+        from hydra import compose, initialize_config_dir
+        from omegaconf import OmegaConf
+
+        for method in ("baseline", "denoise"):
+            for mode, split in (("train", "dev"), ("eval", "dev"), ("eval", "test")):
+                for do_sample in (True, False):
+                    with self.subTest(method=method, mode=mode, split=split, do_sample=do_sample):
+                        args = self.args(method=method, mode=mode)
+                        args.base_model, args.eval_split = True, split
+                        sampling = {"do_sample": do_sample, "temperature": 0.7, "top_p": 0.9, "top_k": 40}
+                        overrides = build_overrides(args) + [
+                            f"actor_rollout_ref.rollout.{key}={json.dumps(value)}"
+                            for key, value in sampling.items()
+                        ]
+                        with initialize_config_dir(config_dir=str(ROOT / "recipe/denoise_v2/config"), version_base=None):
+                            cfg = compose(config_name="task_suite_trainer", overrides=overrides)
+                        resolved = OmegaConf.to_container(cfg.actor_rollout_ref.rollout.val_kwargs, resolve=True)
+                        self.assertEqual({key: resolved[key] for key in sampling}, {
+                            "do_sample": True, "temperature": 0.6, "top_p": 0.95, "top_k": -1,
+                        })
+                        self.assertEqual(resolved["n"], 1)
 
 
 if __name__ == "__main__":

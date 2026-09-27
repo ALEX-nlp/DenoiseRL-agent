@@ -27,9 +27,12 @@ def load_manifest(path, benchmark):
 
 
 class TaskWorker:
-    def __init__(self, benchmark, options, max_steps, reward_mode, expected_fingerprint=None, backend=None):
+    def __init__(self, benchmark, options, max_steps, reward_mode, expected_fingerprint=None, backend=None,
+                 success_reward=1.0):
         if reward_mode not in {"score", "success"} or max_steps < 1:
             raise ValueError("Invalid reward_mode or max_steps")
+        if not math.isfinite(success_reward) or success_reward <= 0:
+            raise ValueError("success_reward must be finite and positive")
         self.backend = backend or make_backend(benchmark, {**options, "max_steps": max_steps})
         if expected_fingerprint and benchmark == "webshop":
             if self.backend.catalog_fingerprint != expected_fingerprint:
@@ -37,6 +40,7 @@ class TaskWorker:
                 raise ValueError("WebShop goal catalog differs from manifest (data or catalog seed changed).")
         self.max_steps = max_steps
         self.reward_mode = reward_mode
+        self.success_reward = float(success_reward)
         self.task_id = None
         self.done = True
 
@@ -70,9 +74,10 @@ class TaskWorker:
         score = float(self.info["task_score"])
         if not math.isfinite(score) or not 0 <= score <= 1:
             raise ValueError(f"Invalid normalized task score: {score}")
-        # Pay the final score once. Intermediate/prefix progress is not summed
-        # again, and terminal failures with partial progress retain a signal.
-        reward = (score if self.reward_mode == "score" else float(self.info["won"])) if self.done else 0.0
+        # Pay once at termination, including the shared prefix in the step budget.
+        # Keep native task_score intact for reporting even with binary training rewards.
+        final_reward = score if self.reward_mode == "score" else self.success_reward * float(self.info["won"])
+        reward = final_reward if self.done else 0.0
         self.info["environment_steps"] = self.steps
         return self.obs, reward, self.done, deepcopy(self.info)
 
@@ -83,7 +88,7 @@ class TaskWorker:
 class TaskWorkerGroup:
     """Share immutable WebShop products/index while keeping browser sessions separate."""
 
-    def __init__(self, benchmark, options, max_steps, reward_mode, expected_fingerprint, slots):
+    def __init__(self, benchmark, options, max_steps, reward_mode, expected_fingerprint, slots, success_reward=1.0):
         self.slots = []
         server = None
         for slot in range(slots):
@@ -95,7 +100,7 @@ class TaskWorkerGroup:
                 else:
                     backend.catalog_fingerprint = self.slots[0].backend.catalog_fingerprint
             self.slots.append(TaskWorker(benchmark, options, max_steps, reward_mode,
-                                         expected_fingerprint, backend=backend))
+                                         expected_fingerprint, backend=backend, success_reward=success_reward))
 
     def call_many(self, method, requests):
         return [getattr(self.slots[slot], method)(*args) for slot, args in requests]
@@ -107,12 +112,14 @@ class TaskWorkerGroup:
 
 class RayTaskEnvs:
     def __init__(self, manifest, split, num_processes, resources, max_steps, reward_mode,
-                 per_type_limit=None, backend_overrides=None, expected_tasks=None):
+                 per_type_limit=None, backend_overrides=None, expected_tasks=None, success_reward=1.0):
         import ray
         self.ray = ray
         self.max_steps = int(max_steps)
         self.backend_options = {**manifest["backend_options"], **(backend_overrides or {})}
         identity = {"manifest": manifest, "max_steps": max_steps, "reward_mode": reward_mode}
+        if success_reward != 1.0:
+            identity["success_reward"] = success_reward
         if backend_overrides:
             identity["backend_overrides"] = backend_overrides
         self.task_pool_fingerprint = fingerprint(identity)
@@ -134,7 +141,7 @@ class RayTaskEnvs:
         actor = ray.remote(**resources)(TaskWorkerGroup)
         self.workers = [actor.remote(manifest["benchmark"], self.backend_options, max_steps,
                                      reward_mode, manifest.get("catalog_fingerprint"),
-                                     min(self.slots_per_worker, self.num_processes - start))
+                                     min(self.slots_per_worker, self.num_processes - start), success_reward)
                         for start in range(0, self.num_processes, self.slots_per_worker)]
         self.current_ids = [None] * self.num_processes
 

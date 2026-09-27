@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from omegaconf import OmegaConf, open_dict
+from recipe.denoise_v2.checkpoint_retention import LatestBestCheckpoints
 
 from verl.single_controller.ray import RayClassWithInitArgs
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -146,7 +147,31 @@ class OnlineDenoisePPOTrainer(RayPPOTrainer):
             encoding="utf-8",
         )
 
+    def _maybe_save_checkpoint(self, val_metrics=None, is_last_step=False, initial=False):
+        if not self.config.trainer.get("keep_latest_and_best", False):
+            return super()._maybe_save_checkpoint(val_metrics, is_last_step)
+        if self.config.trainer.get("val_only", False):
+            return
+        if self.config.trainer.get("default_hdfs_dir"):
+            raise ValueError("Latest/best retention requires shared local checkpoint storage")
+        if not hasattr(self, "_checkpoint_retention"):
+            root = Path(self.config.trainer.default_local_dir)
+            if self.config.trainer.get("resume_mode") == "disable" and any(root.glob("global_step_*/actor")):
+                raise ValueError("Fresh training requires an empty checkpoint directory; use a new EXPERIMENT_NAME or resume_mode=auto")
+            self._checkpoint_retention = LatestBestCheckpoints(
+                self.config.trainer.default_local_dir, self.config.trainer.best_checkpoint_metric)
+        frequency = self.config.trainer.save_freq
+        scheduled = not initial and self.global_steps > 0 and frequency > 0 and self.global_steps % frequency == 0
+        return self._checkpoint_retention.maybe_save(
+            self.global_steps, val_metrics, scheduled, is_last_step, self._save_checkpoint, initial=initial)
+
     def _load_checkpoint(self):
+        if (self.config.trainer.get("keep_latest_and_best", False)
+                and not self.config.trainer.get("val_only", False)
+                and self.config.trainer.resume_mode == "auto"):
+            self._checkpoint_retention = LatestBestCheckpoints(
+                self.config.trainer.default_local_dir, self.config.trainer.best_checkpoint_metric)
+            self._checkpoint_retention.restore_trackers()
         result = super()._load_checkpoint()
         if not self._v2_enabled() or self.global_steps <= 0:
             return result

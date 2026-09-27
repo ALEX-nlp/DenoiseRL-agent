@@ -80,7 +80,7 @@ def build_overrides(args):
     denoise = args.method == "denoise" and args.mode == "train"
     training = args.mode == "train"
     scienceworld = args.benchmark == "scienceworld"
-    eval_split = args.eval_split or ("test" if scienceworld and not training else "dev")
+    eval_split = args.eval_split or ("dev" if scienceworld and training else "test")
     if scienceworld and training and eval_split != "dev":
         raise ValueError("Use dev for training monitoring; test is reserved for the final evaluation")
     data_dir = Path(args.data_dir or ROOT / "recipe/denoise_v2/local_data" / args.benchmark).expanduser().resolve()
@@ -156,9 +156,27 @@ def build_overrides(args):
         "trainer.rollout_data_dir": str(ROOT / "recipe/denoise_v2/dumps" / experiment / "rollout"),
         "trainer.validation_data_dir": str(ROOT / "recipe/denoise_v2/dumps" / experiment / "validation"),
     }
+    if args.benchmark == "webshop":
+        # Use the same evaluation protocol for baseline/denoise and dev/test,
+        # independently of training rollout sampling.
+        values.update({
+            "env.task_suite.reward_mode": "success" if training else "score",
+            "env.task_suite.success_reward": 10.0,
+            "env.task_suite.eval_expected_tasks": 500 if eval_split == "test" else None,
+            "trainer.keep_latest_and_best": training,
+            "trainer.best_checkpoint_metric": f"val/{eval_split}/success_rate",
+            "actor_rollout_ref.rollout.val_kwargs.do_sample": True,
+            "actor_rollout_ref.rollout.val_kwargs.temperature": 0.6,
+            "actor_rollout_ref.rollout.val_kwargs.top_p": 0.95,
+            "actor_rollout_ref.rollout.val_kwargs.top_k": -1,
+        })
     if scienceworld:
         protocol = getattr(args, "eval_protocol", "swiftsage")
         values.update({
+            "actor_rollout_ref.rollout.val_kwargs.do_sample": True,
+            "actor_rollout_ref.rollout.val_kwargs.temperature": 0.6,
+            "actor_rollout_ref.rollout.val_kwargs.top_p": 0.95,
+            "actor_rollout_ref.rollout.val_kwargs.top_k": -1,
             "env.task_suite.scienceworld_simplifications": "easy",
             "env.task_suite.scienceworld_score_mode": "last_nonnegative",
             "env.task_suite.eval_protocol": "dev_monitor" if training else protocol,
@@ -209,8 +227,7 @@ def final_evaluation_overrides(completion, protocol):
         "env.denoise.online.model_path": None,
         "actor_rollout_ref.actor.use_kl_loss": False,
         "actor_rollout_ref.rollout.val_kwargs.n": 1,
-        "actor_rollout_ref.rollout.val_kwargs.do_sample": False,
-        "actor_rollout_ref.rollout.val_kwargs.temperature": 0.0,
+        # Keep the evaluation decoding settings from the original launch command.
         "trainer.val_only": True, "trainer.val_before_train": True,
         "trainer.resume_mode": "resume_path", "trainer.resume_from_path": checkpoint,
         "trainer.completion_path": None,

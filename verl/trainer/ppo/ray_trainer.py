@@ -748,6 +748,8 @@ class RayPPOTrainer:
                 "backend_options": vector.backend_options, "action_limit": vector.max_steps,
                 "environment_fingerprint": vector.task_pool_fingerprint,
                 "repeats": val_n, "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
+                "sampling": {key: self.config.actor_rollout_ref.rollout.val_kwargs[key]
+                             for key in ("do_sample", "temperature", "top_p", "top_k")},
                 "completed_episodes": 0, "elapsed_seconds": 0,
             }
             if report_dir:
@@ -1160,6 +1162,10 @@ class RayPPOTrainer:
             print("Warning: remove_previous_ckpt_in_save is deprecated," + " set max_actor_ckpt_to_keep=1 and max_critic_ckpt_to_keep=1 instead")
         max_actor_ckpt_to_keep = self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         max_critic_ckpt_to_keep = self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+        if self.config.trainer.get("keep_latest_and_best", False):
+            # Complete-checkpoint retention runs after the subclass saves its state.
+            # Worker-level FIFO rotation would otherwise delete the historical best.
+            max_actor_ckpt_to_keep = max_critic_ckpt_to_keep = None
 
         self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep)
 
@@ -1175,8 +1181,16 @@ class RayPPOTrainer:
 
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
-        with open(local_latest_checkpointed_iteration, "w") as f:
-            f.write(str(self.global_steps))
+        if not self.config.trainer.get("keep_latest_and_best", False):
+            with open(local_latest_checkpointed_iteration, "w") as f:
+                f.write(str(self.global_steps))
+
+    def _maybe_save_checkpoint(self, val_metrics=None, is_last_step=False, initial=False):
+        if self.global_steps > 0 and (
+            (self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0))
+            or (is_last_step and self.config.trainer.get("completion_path"))
+        ):
+            self._save_checkpoint()
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
@@ -1275,6 +1289,8 @@ class RayPPOTrainer:
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
+            if self.config.trainer.get("keep_latest_and_best", False):
+                self._maybe_save_checkpoint(val_metrics, initial=True)
 
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -1515,6 +1531,7 @@ class RayPPOTrainer:
                             )
 
                     # validate
+                    val_metrics = None
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                         with _timer("testing", timing_raw):
                             val_metrics: dict = self._validate()
@@ -1522,9 +1539,8 @@ class RayPPOTrainer:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
 
-                    if (self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0)) or (is_last_step and self.config.trainer.get("completion_path")):
-                        with _timer("save_checkpoint", timing_raw):
-                            self._save_checkpoint()
+                    with _timer("save_checkpoint", timing_raw):
+                        self._maybe_save_checkpoint(val_metrics, is_last_step=is_last_step)
 
                 # training metrics
                 metrics.update(
