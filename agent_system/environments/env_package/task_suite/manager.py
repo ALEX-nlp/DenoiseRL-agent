@@ -157,6 +157,11 @@ def make_task_envs(config):
     from omegaconf import OmegaConf
     suite = config.env.task_suite
     manifest = load_manifest(suite.manifest_path, suite.benchmark)
+    if suite.benchmark == "webshop" and suite.get("webshop_data_profile"):
+        actual = manifest["backend_options"].get("data_profile", "full_human")
+        if actual != suite.webshop_data_profile:
+            raise ValueError(f"WebShop data profile mismatch: launch={suite.webshop_data_profile}, manifest={actual}; "
+                             "rerun prepare_tasks with the requested --webshop-data-profile and use its --data-dir")
     resources = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
     def create(split, capacity, validation=False):
         vector = RayTaskEnvs(

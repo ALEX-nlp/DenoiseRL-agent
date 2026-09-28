@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+from agent_system.webshop_protocol import webshop_data_profile
 
 
 WEBSHOP_RHO_GROUPINGS = ("structure", "category")
@@ -20,7 +21,7 @@ def webshop_task_type(goal, grouping):
     if grouping != "structure":
         raise ValueError(f"Unknown WebShop rho grouping: {grouping!r}")
     attributes, options = goal.get("attributes"), goal.get("goal_options")
-    # Human goals have at least one attribute; do not silently put malformed
+    # Goals have at least one attribute; do not silently put malformed
     # annotations into a valid structural group. Upstream accepts list/dict options.
     if not isinstance(attributes, (list, tuple)) or not attributes:
         raise ValueError("WebShop structure grouping requires non-empty attributes")
@@ -37,6 +38,9 @@ def fingerprint(value):
 
 class WebShopBackend:
     def __init__(self, options, server=None, session_prefix=None):
+        # Missing profile identifies legacy full-catalog/human-goal manifests.
+        self.data_profile = options.get("data_profile", "full_human")
+        profile = webshop_data_profile(self.data_profile)
         # Manifests prepared before structural grouping used category grouping.
         self.rho_grouping = options.get("rho_grouping", "category")
         if self.rho_grouping not in WEBSHOP_RHO_GROUPINGS:
@@ -52,24 +56,26 @@ class WebShopBackend:
         # The simulator shuffles AND constructs goals using this seed. It must
         # be identical for every worker and split, independent of training seed.
         self.env = WebAgentTextEnv(
-            observation_mode="text", human_goals=True,
+            observation_mode="text", human_goals=profile["human_goals"],
             file_path=options["file_path"], attr_path=options["attr_path"],
             seed=int(options.get("catalog_seed", 42)), num_products=None,
+            search_index_path=options.get("search_index_path") or str(root / "search_engine" / profile["index"]),
             server=server, session_prefix=session_prefix,
         )
         self.goals = self.env.server.goals
         self.catalog_fingerprint = fingerprint(self.goals) if server is None else None
 
     def catalog(self):
-        if len(self.goals) <= 1500:
-            raise ValueError("WebShop requires the full goal pool (>1500 goals) for train/dev/test splits.")
+        train_start = webshop_data_profile(self.data_profile)["train_start"]
+        if len(self.goals) <= train_start:
+            raise ValueError(f"WebShop {self.data_profile} requires more than {train_start} goals")
         return {
             split: [
                 {"task_id": str(i), "task_type": webshop_task_type(self.goals[i], self.rho_grouping)}
                 for i in indices
             ]
             for split, indices in {
-                "test": range(500), "dev": range(500, 1500), "train": range(1500, len(self.goals))
+                "test": range(500), "dev": range(500, train_start), "train": range(train_start, len(self.goals))
             }.items()
         }
 

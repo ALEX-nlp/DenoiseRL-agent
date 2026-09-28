@@ -15,7 +15,7 @@
 - 两个方法的 WebShop 训练奖励对齐 GiGPO：**终止时完全成功给 10，失败（含部分得分和超时）给 0**，中间步骤为 0。配置为 `reward_mode=success`、`success_reward=10`；无效输出格式惩罚系数保持 0.1。评测环境始终返回原生 0–1 得分，单独统计完全成功率，避免把 10 倍成功率当作原生 score。
 - ScienceWorld 的训练环境奖励为：终止时完全成功给 1，失败、部分完成或超时给 0，中间步骤为 0；配置为 `reward_mode=success`、`success_reward=1`，baseline 与 DenoiseRL 一致。完全成功仍要求原生 score=100，现有无效动作惩罚独立保留。dev/test 始终使用末次非负分数除以 100 作为评测环境返回值，继续报告原生 `score`、`score_macro` 和完全成功率；部分进度仅用于评测及诊断，不作为默认训练奖励。
 - WebShop 使用 GiGPO 的 `WEBSHOP_TEMPLATE` / `WEBSHOP_TEMPLATE_NO_HIS`、观测分段加引号、最近两步历史及 13000 字符历史回退。复用 `webshop_projection`：动作转小写，解析首个 `<action>` 块，格式有效性要求 `<think>` 标签且不含中文；是否在当前可用动作中不另算格式惩罚。solver、弱模型和评测使用同一协议。
-- WebShop 训练集保持 `[1500, n)`，test 保持完整 `[0,500)`；已有 dev `[500,1500)` 保留在 manifest 中但默认不使用，也不并入训练集。ScienceWorld 直接使用官方 `get_variations_train/dev/test()`，不随机重划。
+- WebShop 默认 `gigpo_small`：1000 商品集、synthetic goals，固定 catalog seed=42；训练 `[500, N)`、完整 test `[0,500)`、不划分 dev。固定镜像通过原生目标生成函数得到 N=6910，即 6410 train / 500 test（任务按 goal 划分，同一商品的不同选项组合可跨 split）。ScienceWorld 直接使用官方 `get_variations_train/dev/test()`，不随机重划。
 - WebShop 训练前、每 25 步和独立评测默认遍历完整 500 条 test。ScienceWorld 仍只用 dev 做训练监控：默认跳过初始评估，每 25 步评估固定小 dev 集，训练成功后自动用最终 checkpoint 跑 SwiftSage 270-task test。所有评估断言实际 task ID、数量、重复次数与选定任务集一致，从干净初始状态开始，不需要弱模型或 curriculum 文件。
 
 ## rho 分组的含义
@@ -92,9 +92,9 @@ python -m recipe.denoise_v2.task_suite.setup_environment --benchmark webshop --m
 python -m recipe.denoise_v2.task_suite.setup_environment --benchmark scienceworld --mode fresh
 ```
 
-WebShop 需要完整商品、属性、human instructions、spaCy 小模型和搜索索引。旧 `setup.sh` 默认禁用，不再用于这套安装流程。下面的数据脚本会复用已下载文件，在临时目录建完整索引，并保留旧索引备份；不会安装 Python/Conda 包。1000 商品集不用于标准划分。
+WebShop 默认使用 GiGPO 的 `use_small=True` / `human_goals=False` 数据设置：`items_shuffle_1000.json` 和 `items_ins_v2_1000.json`。原生加载器仍需 `items_human_ins.json`，但不以它生成任务。需要 spaCy 小模型及匹配的小商品搜索索引。数据脚本在临时目录构建独立的 `search_engine/indexes_gigpo_small`，不会替换旧全量索引；不会安装 Python/Conda 包。
 
-数据下载默认使用固定版本的 Hugging Face 完整副本，并校验大小与 SHA256。Google Drive 原链接获取失败时无需重装环境；可用 `--hf-endpoint https://hf-mirror.com` 选择 HF 镜像，具体来源、续传与离线复制步骤见 [数据准备文档](ENVIRONMENTS.md#2-准备数据与任务清单)。
+数据下载默认使用固定版本的 Hugging Face 数据副本，并校验大小与 SHA256。Google Drive 原链接获取失败时无需重装环境；可用 `--hf-endpoint https://hf-mirror.com` 选择 HF 镜像，具体来源、续传与离线复制步骤见 [数据准备文档](ENVIRONMENTS.md#2-准备数据与任务清单)。
 
 ScienceWorld 固定 [官方仓库](https://github.com/allenai/ScienceWorld) 包含确定性 reset 改进的源码提交，版本见 [依赖文件](requirements-scienceworld.txt)。安装器同时安装 Java 11。`prepare_tasks` 保存实际 Python 包版本和 JAR SHA256，运行时不匹配会报错；baseline/denoise 保持同一版本。
 
@@ -108,7 +108,7 @@ python -m recipe.denoise_v2.task_suite.prepare_webshop_assets --download --sourc
 python -m recipe.denoise_v2.task_suite.prepare_tasks \
   --benchmark webshop --train-batch-size 16 \
   --webshop-rho-grouping structure \
-  --output recipe/denoise_v2/local_data/webshop
+  --output recipe/denoise_v2/local_data/webshop_gigpo_small
 
 conda activate denoise-scienceworld
 python -m recipe.denoise_v2.task_suite.prepare_tasks \
@@ -116,7 +116,7 @@ python -m recipe.denoise_v2.task_suite.prepare_tasks \
   --output recipe/denoise_v2/local_data/scienceworld
 ```
 
-每个输出目录包含 `tasks.json`、`train.parquet`、`dev.parquet`、`test.parquet`。train.parquet 只有一个占位 batch，实际任务顺序由 curriculum 控制；配置中的 trainer epoch 与遍历完整任务池的 pool epoch 不同。
+WebShop 默认输出 `tasks.json`、`train.parquet`、`test.parquet`，manifest 中 dev 为空，不生成 dev.parquet。ScienceWorld 还包含 `dev.parquet`。train.parquet 只有一个占位 batch，实际任务顺序由 curriculum 控制；配置中的 trainer epoch 与遍历完整任务池的 pool epoch 不同。
 
 若比较原先的商品大类分组，单独生成清单，并为 baseline/denoise 选用相同数据目录；使用独立实验名保存结果：
 
@@ -134,14 +134,18 @@ EXPERIMENT_NAME=webshop_category_denoise_7b_seed0 \
 
 ScienceWorld 启动器默认使用 SwiftSage 的 `simplifications=easy`，覆盖旧 manifest 的 simplifications，并把有效配置写入评测报告及训练环境指纹。新建 manifest 建议给 `prepare_tasks` 加 `--simplifications easy`，让原生 smoke test 也使用相同设置。自定义协议可覆盖 `env.task_suite.scienceworld_simplifications`，需使用独立实验名；不能与默认协议混报。可传 `--jar-path /absolute/scienceworld.jar` 指定 JAR。始终 `generateGoldPath=False`，不读取专家轨迹。
 
-WebShop 可用 `--webshop-data-dir` 指定 JSON 文件目录，但搜索索引仍由 bundled WebShop 加载，须与这批商品匹配。manifest 记录绝对路径，迁移到集群后应在集群重新生成 manifest。
+WebShop 可用 `--webshop-data-dir` 指定 JSON 目录、`--webshop-index-dir` 指定匹配的搜索索引。默认读取 bundled 小商品索引。manifest 记录数据 profile 和绝对路径，迁移到集群后应在集群重新生成。启动时检查 profile，避免误用旧 full/human 清单。
+
+需要复评旧全量商品/human-goal 实验时，在数据准备和启动命令上显式加 `--webshop-data-profile full_human`，并指定旧 `--data-dir recipe/denoise_v2/local_data/webshop`。该兼容模式保留旧 train/dev/test 分区。新旧任务定义不同，不能复用旧 curriculum checkpoint；新实验名默认带 `_gigpo_small`，显式设置 `EXPERIMENT_NAME` 时也要换新名字。
+
+本次只对齐数据与任务划分，保留 7B、16 rollouts、256 response tokens、完整 500-test、评测 temperature=0.6/top_p=0.95、500 训练 steps 和 latest+best。训练仍使用现有任务池遍历，不改成官方跨 batch 随机采样。与论文成绩的差异详见 [W&B 与 GiGPO 对照记录](WEBSHOP_COMPARISON.md)。
 
 先检查原生环境的确定性重放：
 
 ```bash
 conda activate denoise-webshop
 python -m recipe.denoise_v2.task_suite.smoke_env \
-  --benchmark webshop --manifest recipe/denoise_v2/local_data/webshop/tasks.json
+  --benchmark webshop --manifest recipe/denoise_v2/local_data/webshop_gigpo_small/tasks.json
 conda activate denoise-scienceworld
 python -m recipe.denoise_v2.task_suite.smoke_env \
   --benchmark scienceworld --manifest recipe/denoise_v2/local_data/scienceworld/tasks.json

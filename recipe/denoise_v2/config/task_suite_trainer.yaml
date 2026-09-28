@@ -16,6 +16,7 @@ env:
     enabled: True
     benchmark: webshop
     manifest_path: null
+    webshop_data_profile: null
     eval_split: dev
     reward_mode: score
     success_reward: 1.0

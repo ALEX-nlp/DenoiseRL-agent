@@ -192,7 +192,9 @@ def generate_product_prices(all_products):
     return product_prices
 
 
-def init_search_engine(num_products=None):
+def init_search_engine(num_products=None, search_index_path=None):
+    if search_index_path is not None:
+        return LuceneSearcher(os.fspath(search_index_path))
     if num_products == 100:
         indexes = 'indexes_100'
     elif num_products == 1000:

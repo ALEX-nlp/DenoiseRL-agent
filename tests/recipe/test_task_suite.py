@@ -27,6 +27,7 @@ from recipe.denoise_v2.gamefile_curriculum import TaskTypePoolCurriculum
 from recipe.denoise_v2.task_suite.launch import build_overrides, resolve_checkpoint
 from agent_system.alfworld_evaluation import build_gamefile_reset_kwargs, validate_gamefile_coverage
 from agent_system.scienceworld_protocol import render_prompt
+from agent_system.webshop_protocol import WEBSHOP_DATA_PROFILES, webshop_data_profile
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "agent_system/environments/env_package/task_suite"
@@ -419,6 +420,7 @@ class NativeAdapterTests(unittest.TestCase):
     def test_webshop_native_split_and_category_mapping(self):
         backend = backends.WebShopBackend.__new__(backends.WebShopBackend)
         backend.rho_grouping = "category"
+        backend.data_profile = "full_human"
         backend.goals = [{"category": "books"}] * 1600
         backend.goals[1501] = {"category": "electronics"}
         backend.goals[1503] = {}
@@ -428,6 +430,60 @@ class NativeAdapterTests(unittest.TestCase):
         self.assertEqual(splits["train"][2]["task_type"], "books")
         self.assertEqual(splits["train"][1]["task_type"], "electronics")
         self.assertEqual(splits["train"][3]["task_type"], "shopping")
+
+    def test_small_catalog_uses_synthetic_goals_and_matching_index(self):
+        env_module = types.ModuleType("web_agent_site.envs")
+        env_module.WebAgentTextEnv = unittest.mock.Mock()
+        env_module.WebAgentTextEnv.return_value.server.goals = [{"category": "books"}] * 1600
+        with patch.dict(sys.modules, {"web_agent_site.envs": env_module}):
+            for profile, human in (("gigpo_small", False), ("full_human", True)):
+                backend = backends.WebShopBackend({"data_profile": profile, "file_path": "products",
+                                                   "attr_path": "attrs", "search_index_path": "/matching-index"})
+                kwargs = env_module.WebAgentTextEnv.call_args.kwargs
+                self.assertEqual(kwargs["human_goals"], human)
+                self.assertEqual(kwargs["seed"], 42)
+                self.assertIsNone(kwargs["num_products"])
+                self.assertEqual(kwargs["search_index_path"], "/matching-index")
+                if not human:
+                    splits = backend.catalog()
+                    self.assertEqual([len(splits[s]) for s in ("train", "dev", "test")], [1100, 0, 500])
+                    self.assertEqual(splits["train"][0]["task_id"], "500")
+                    self.assertEqual(splits["test"][-1]["task_id"], "499")
+
+    def test_small_manifest_requires_exact_goal_partition_and_no_dev(self):
+        manifest = {"version": 1, "benchmark": "webshop", "backend_options": {"data_profile": "gigpo_small"},
+                    "splits": {"train": [{"task_id": str(i), "task_type": "shopping"} for i in range(500, 520)],
+                               "test": [{"task_id": str(i), "task_type": "shopping"} for i in range(500)], "dev": []}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tasks.json"
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(runtime.load_manifest(path, "webshop"), manifest)
+            manifest["splits"]["dev"].append(manifest["splits"]["train"].pop(0))
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "GiGPO small requires"):
+                runtime.load_manifest(path, "webshop")
+
+    def test_native_server_opens_explicit_index_without_truncating_products(self):
+        engine_ns = load_definitions(PACKAGE.parent / "webshop/webshop/web_agent_site/engine/engine.py", {
+            "os": os, "BASE_DIR": "/native/engine", "LuceneSearcher": unittest.mock.Mock(),
+        })
+        server_path = PACKAGE.parent / "webshop/webshop/web_agent_site/envs/web_agent_text_env.py"
+        tree = ast.parse(server_path.read_text())
+        server_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "SimServer")
+        # Only the constructor is needed; Flask route decorators are unrelated.
+        server_class.body = [node for node in server_class.body if isinstance(node, ast.FunctionDef) and node.name == "__init__"]
+        products = [{"asin": "a"}]
+        load_products = unittest.mock.Mock(return_value=(products, {}, {}, {}))
+        get_goals = unittest.mock.Mock(return_value=[])
+        ns = {"load_products": load_products, "get_goals": get_goals, "random": __import__("random"), "np": np,
+              "init_search_engine": engine_ns["init_search_engine"]}
+        exec(compile(ast.Module(body=[server_class], type_ignores=[]), str(server_path), "exec"), ns)
+        ns["SimServer"](42, "local", "products.json", "attrs.json", human_goals=False,
+                        search_index_path="/small-index")
+        engine_ns["LuceneSearcher"].assert_called_once_with("/small-index")
+        load_products.assert_called_once_with(filepath="products.json", attrpath="attrs.json",
+                                              num_products=None, human_goals=False)
+        get_goals.assert_called_once_with(products, {}, False)
 
     def test_webshop_six_structural_groups_and_boundaries(self):
         cases = [
@@ -543,6 +599,7 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(benchmark, "webshop")
             backend = backends.WebShopBackend.__new__(backends.WebShopBackend)
             backend.rho_grouping = options["rho_grouping"]
+            backend.data_profile = options["data_profile"]
             backend.goals = [{"category": "fashion" if i % 2 else "electronics",
                               "attributes": ["portable"], "goal_options": []} for i in range(1600)]
             backend.catalog_fingerprint = backends.fingerprint(backend.goals)
@@ -551,6 +608,8 @@ class PreparationTests(unittest.TestCase):
 
         prepare = load_definitions(ROOT / "recipe/denoise_v2/task_suite/prepare_tasks.py", {
             "argparse": argparse, "Counter": Counter, "json": json, "Path": Path,
+            "__file__": str(ROOT / "recipe/denoise_v2/task_suite/prepare_tasks.py"),
+            "WEBSHOP_DATA_PROFILES": WEBSHOP_DATA_PROFILES, "webshop_data_profile": webshop_data_profile,
             "WEBSHOP_RHO_GROUPINGS": backends.WEBSHOP_RHO_GROUPINGS,
             "WEBSHOP_STRUCTURE_GROUPS": backends.WEBSHOP_STRUCTURE_GROUPS,
             "make_backend": make_backend, "fingerprint": backends.fingerprint,
@@ -564,29 +623,37 @@ class PreparationTests(unittest.TestCase):
             root = Path(directory)
             for filename in ("items_shuffle.json", "items_ins_v2.json", "items_human_ins.json"):
                 (root / filename).write_text("{}")
-            for mode, extra in (("structure", []), ("category", ["--webshop-rho-grouping", "category"])):
-                args = ["prepare_tasks", "--benchmark", "webshop", "--output", str(root / mode),
-                        "--webshop-data-dir", str(root)] + extra
-                output = io.StringIO()
-                with patch.object(sys, "argv", args), patch.dict(sys.modules, {"datasets": fake_datasets}), redirect_stdout(output):
-                    prepare()
-                manifest = runtime.load_manifest(root / mode / "tasks.json", "webshop")
-                manifests[mode] = manifest
-                self.assertEqual(manifest["backend_options"]["rho_grouping"], mode)
-                report = json.loads(output.getvalue())
-                self.assertEqual(report["tasks"], {"train": 100, "dev": 1000, "test": 500})
-                if mode == "structure":
-                    counts = report["task_type_counts"]["train"]
-                    self.assertEqual(set(counts), set(backends.WEBSHOP_STRUCTURE_GROUPS))
-                    self.assertEqual(counts["options_0__attrs_1_2"], 100)
-                    self.assertEqual(sum(counts.values()), 100)
-                else:
-                    self.assertEqual(report["task_type_counts"]["train"], {"electronics": 50, "fashion": 50})
-            for split in ("train", "dev", "test"):
-                self.assertEqual([row["task_id"] for row in manifests["structure"]["splits"][split]],
-                                 [row["task_id"] for row in manifests["category"]["splits"][split]])
-            self.assertEqual(manifests["structure"]["catalog_fingerprint"], manifests["category"]["catalog_fingerprint"])
-            self.assertNotEqual(backends.fingerprint(manifests["structure"]), backends.fingerprint(manifests["category"]))
+            for name in ("items_shuffle_1000.json", "items_ins_v2_1000.json"):
+                (root / name).write_text("{}")
+            for data_profile, train_count, dev_count in (("full_human", 100, 1000), ("gigpo_small", 1100, 0)):
+                for mode, extra in (("structure", []), ("category", ["--webshop-rho-grouping", "category"])):
+                    output_dir = root / data_profile / mode
+                    args = ["prepare_tasks", "--benchmark", "webshop", "--output", str(output_dir),
+                            "--webshop-data-dir", str(root), "--webshop-data-profile", data_profile] + extra
+                    output = io.StringIO()
+                    with patch.object(sys, "argv", args), patch.dict(sys.modules, {"datasets": fake_datasets}), redirect_stdout(output):
+                        prepare()
+                    manifest = runtime.load_manifest(output_dir / "tasks.json", "webshop")
+                    manifests[mode] = manifest
+                    options = manifest["backend_options"]
+                    self.assertEqual(options["rho_grouping"], mode)
+                    self.assertEqual(Path(options["file_path"]).name, WEBSHOP_DATA_PROFILES[data_profile]["products"])
+                    self.assertEqual(Path(options["search_index_path"]).name, WEBSHOP_DATA_PROFILES[data_profile]["index"])
+                    self.assertEqual((output_dir / "dev.parquet").exists(), bool(dev_count))
+                    report = json.loads(output.getvalue())
+                    self.assertEqual(report["tasks"], {"train": train_count, "dev": dev_count, "test": 500})
+                    if mode == "structure":
+                        counts = report["task_type_counts"]["train"]
+                        self.assertEqual(set(counts), set(backends.WEBSHOP_STRUCTURE_GROUPS))
+                        self.assertEqual(counts["options_0__attrs_1_2"], train_count)
+                        self.assertEqual(sum(counts.values()), train_count)
+                    else:
+                        self.assertEqual(report["task_type_counts"]["train"], {"electronics": train_count // 2, "fashion": train_count // 2})
+                for split in ("train", "dev", "test"):
+                    self.assertEqual([row["task_id"] for row in manifests["structure"]["splits"][split]],
+                                     [row["task_id"] for row in manifests["category"]["splits"][split]])
+                self.assertEqual(manifests["structure"]["catalog_fingerprint"], manifests["category"]["catalog_fingerprint"])
+                self.assertNotEqual(backends.fingerprint(manifests["structure"]), backends.fingerprint(manifests["category"]))
 
 
 class LauncherTests(unittest.TestCase):
@@ -611,12 +678,30 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(values["trainer.keep_latest_and_best"], mode == "train")
                 self.assertEqual(values["trainer.best_checkpoint_metric"], "val/test/success_rate")
 
+    def test_small_profile_changes_only_data_paths_metadata_and_run_identity(self):
+        for method in ("baseline", "denoise"):
+            small = self.values(self.args(method=method, webshop_data_profile="gigpo_small"))
+            full = self.values(self.args(method=method, webshop_data_profile="full_human"))
+            allowed = {"data.train_files", "data.val_files", "env.task_suite.manifest_path",
+                       "env.task_suite.webshop_data_profile", "env.webshop.use_small", "env.webshop.human_goals",
+                       "trainer.experiment_name", "trainer.default_local_dir", "trainer.rollout_data_dir",
+                       "trainer.validation_data_dir"}
+            self.assertTrue({key for key in small if small[key] != full[key]} <= allowed)
+            self.assertIn("/webshop_gigpo_small/tasks.json", small["env.task_suite.manifest_path"])
+            self.assertEqual(small["env.task_suite.webshop_data_profile"], "gigpo_small")
+            self.assertFalse(small["env.webshop.human_goals"])
+            self.assertTrue(small["env.webshop.use_small"])
+        args = self.args()
+        args.eval_split = "dev"
+        with self.assertRaisesRegex(ValueError, "no dev split"):
+            self.values(args)
+
     @unittest.skipUnless(importlib.util.find_spec("hydra"), "Hydra is an optional test dependency")
     def test_webshop_validation_keeps_native_score_reward_and_full_task_pool(self):
         from hydra import compose, initialize_config_dir
         with initialize_config_dir(config_dir=str(ROOT / "recipe/denoise_v2/config"), version_base=None):
             cfg = compose(config_name="task_suite_trainer", overrides=build_overrides(self.args()))
-        with patch.dict(manager_ns, {"load_manifest": lambda *args: {}, "RayTaskEnvs": unittest.mock.Mock()}):
+        with patch.dict(manager_ns, {"load_manifest": lambda *args: {"backend_options": {"data_profile": "gigpo_small"}}, "RayTaskEnvs": unittest.mock.Mock()}):
             train, val = manager_ns["make_task_envs"](cfg)
             train_call, val_call = manager_ns["RayTaskEnvs"].call_args_list
         self.assertEqual(train_call.args[1], "train")
@@ -627,6 +712,11 @@ class LauncherTests(unittest.TestCase):
         self.assertIsNone(val_call.kwargs["per_type_limit"])
         self.assertEqual(val_call.kwargs["expected_tasks"], 500)
         self.assertEqual(set(val), {"test"})
+        with patch.dict(manager_ns, {"load_manifest": lambda *args: {"backend_options": {}},
+                                     "RayTaskEnvs": unittest.mock.Mock()}):
+            with self.assertRaisesRegex(ValueError, "profile mismatch"):
+                manager_ns["make_task_envs"](cfg)
+            manager_ns["RayTaskEnvs"].assert_not_called()
         # Native partial credit is still the reported validation score, despite reward=0 in training.
         worker = runtime.TaskWorker("webshop", {}, 3, val_call.args[5], backend=FakeBackend())
         worker.reset("a")
@@ -712,6 +802,7 @@ class LauncherTests(unittest.TestCase):
                     with self.subTest(method=method, mode=mode, split=split, do_sample=do_sample):
                         args = self.args(method=method, mode=mode)
                         args.base_model, args.eval_split = True, split
+                        args.webshop_data_profile = "full_human" if split == "dev" else "gigpo_small"
                         sampling = {"do_sample": do_sample, "temperature": 0.7, "top_p": 0.9, "top_k": 40}
                         overrides = build_overrides(args) + [
                             f"actor_rollout_ref.rollout.{key}={json.dumps(value)}"

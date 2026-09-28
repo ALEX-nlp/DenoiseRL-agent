@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .backends import fingerprint, make_backend, WebShopBackend
 from agent_system.scienceworld_protocol import select_tasks
+from agent_system.webshop_protocol import webshop_data_profile
 
 
 def load_manifest(path, benchmark):
@@ -14,15 +15,23 @@ def load_manifest(path, benchmark):
     if manifest["benchmark"] != benchmark or manifest["version"] != 1:
         raise ValueError("Task manifest benchmark/version mismatch; rerun prepare_tasks.")
     seen = set()
+    small = benchmark == "webshop" and manifest.get("backend_options", {}).get("data_profile") == "gigpo_small"
+    if benchmark == "webshop":
+        webshop_data_profile(manifest.get("backend_options", {}).get("data_profile", "full_human"))
     for split in ("train", "dev", "test"):
         rows = manifest["splits"][split]
-        if not rows:
+        if not rows and not (small and split == "dev"):
             raise ValueError(f"Empty task split: {split}")
         for row in rows:
             task_id = row["task_id"]
             if not isinstance(task_id, str) or not row["task_type"] or task_id in seen:
                 raise ValueError(f"Duplicate or invalid task identity across splits: {task_id!r}")
             seen.add(task_id)
+    if small:
+        expected = {"test": range(500), "dev": (), "train": range(500, len(seen))}
+        for split, indices in expected.items():
+            if [row["task_id"] for row in manifest["splits"][split]] != [str(i) for i in indices]:
+                raise ValueError("GiGPO small requires test [0,500), train [500,N), and no dev; rerun prepare_tasks")
     return manifest
 
 

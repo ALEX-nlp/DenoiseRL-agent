@@ -4,6 +4,7 @@ import argparse
 from collections import Counter
 import json
 from pathlib import Path
+from agent_system.webshop_protocol import WEBSHOP_DATA_PROFILES, webshop_data_profile
 
 from agent_system.environments.env_package.task_suite.backends import (
     WEBSHOP_RHO_GROUPINGS, WEBSHOP_STRUCTURE_GROUPS, make_backend, fingerprint,
@@ -17,6 +18,8 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--webshop-data-dir", type=Path, default=Path("agent_system/environments/env_package/webshop/webshop/data"))
     parser.add_argument("--catalog-seed", type=int, default=42)
+    parser.add_argument("--webshop-data-profile", choices=WEBSHOP_DATA_PROFILES, default="gigpo_small")
+    parser.add_argument("--webshop-index-dir", type=Path, help="Search index built from the selected product/attribute files")
     parser.add_argument("--webshop-rho-grouping", choices=WEBSHOP_RHO_GROUPINGS, default="structure",
                         help="WebShop rho groups: structure (default, six requirement groups) or category (legacy)")
     parser.add_argument("--jar-path")
@@ -26,8 +29,13 @@ def main():
     if args.train_batch_size < 1:
         parser.error("--train-batch-size must be positive")
     if args.benchmark == "webshop":
-        options = {"file_path": str((args.webshop_data_dir / "items_shuffle.json").resolve()),
-                   "attr_path": str((args.webshop_data_dir / "items_ins_v2.json").resolve()),
+        profile = webshop_data_profile(args.webshop_data_profile)
+        index = args.webshop_index_dir or (Path(__file__).resolve().parents[3] /
+                "agent_system/environments/env_package/webshop/webshop/search_engine" / profile["index"])
+        options = {"data_profile": args.webshop_data_profile,
+                   "file_path": str((args.webshop_data_dir / profile["products"]).resolve()),
+                   "attr_path": str((args.webshop_data_dir / profile["attributes"]).resolve()),
+                   "search_index_path": str(index.resolve()),
                    "human_attr_path": str((args.webshop_data_dir / "items_human_ins.json").resolve()),
                    "catalog_seed": args.catalog_seed, "rho_grouping": args.webshop_rho_grouping}
         for key in ("file_path", "attr_path", "human_attr_path"):
@@ -65,7 +73,8 @@ def main():
     # the checkpointed curriculum, never from placeholder row indices.
     write_rows("train", args.train_batch_size)
     for split in ("dev", "test"):
-        write_rows(split, len(splits[split]))
+        if splits[split]:
+            write_rows(split, len(splits[split]))
     task_type_counts = {}
     for split, rows in splits.items():
         counts = Counter(row["task_type"] for row in rows)

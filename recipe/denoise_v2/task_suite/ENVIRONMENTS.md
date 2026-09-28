@@ -111,21 +111,25 @@ python -m recipe.denoise_v2.task_suite.setup_environment --benchmark scienceworl
 ```bash
 conda activate denoise-webshop
 
-# 已下载的完整 JSON 会复用；在临时目录重建完整搜索索引，成功后保留旧索引备份。
+# 默认准备 GiGPO 小商品集；复用完整下载，单独构建小商品索引。
 python -m recipe.denoise_v2.task_suite.prepare_webshop_assets \
   --download --source huggingface --build-index
 
 python -m recipe.denoise_v2.task_suite.prepare_tasks \
   --benchmark webshop --train-batch-size 16 --webshop-rho-grouping structure \
-  --output recipe/denoise_v2/local_data/webshop
+  --output recipe/denoise_v2/local_data/webshop_gigpo_small
 
 python -m recipe.denoise_v2.task_suite.smoke_env \
-  --benchmark webshop --manifest recipe/denoise_v2/local_data/webshop/tasks.json
+  --benchmark webshop --manifest recipe/denoise_v2/local_data/webshop_gigpo_small/tasks.json
 ```
 
-数据脚本仅下载和建索引，不执行任何 pip / conda 安装。默认来源已改为 [HongbangYuan/webshop 的固定版本](https://huggingface.co/datasets/HongbangYuan/webshop/tree/0129d4a81dbdb827e76afd20a1e2c38b61098613)，是社区托管的完整数据副本。三份文件的大小与校验值已和 [YWZBrandon/webshop-data](https://huggingface.co/datasets/YWZBrandon/webshop-data/tree/ce990fff5aee388db2706f07820c578ab68e0453) 交叉核对；大文件读取 HF LFS 元数据，小型人工指令文件另行下载计算 SHA256。未重新下载 Google Drive 原文件做逐字节比较。
+数据脚本仅下载和建索引，不执行 pip / conda 安装。默认 `--webshop-data-profile gigpo_small` 使用 [固定版本的 Hugging Face 镜像](https://huggingface.co/datasets/HongbangYuan/webshop/tree/0129d4a81dbdb827e76afd20a1e2c38b61098613) 中的 `items_shuffle_1000.json`（4,467,013 bytes）、`items_ins_v2_1000.json`（147,099 bytes），以及原生加载器必需的 `items_human_ins.json`（5,137,548 bytes）。小文件已下载并计算固定 SHA256；未重新下载 Google Drive 原文件做逐字节比较。synthetic goals 不使用 human instructions 生成任务。
 
-`items_shuffle.json` 约 5.48 GB，`items_ins_v2.json` 约 186 MB，`items_human_ins.json` 约 5.14 MB。文件保存在 bundled WebShop 的 `data/`，索引在 `search_engine/indexes/`。下载先写入 `data/.hf-download/`，完成后流式校验大小与 SHA256，再移动到目标位置；HF 下载中断后可重跑相同命令继续。已有 JSON 校验通过后复用；校验不符会报出具体文件，不覆盖原文件。请给数据和索引的临时构建文件预留磁盘空间。
+商品和属性文件决定任务目录，固定 catalog seed=42 生成并打乱 6910 个 goals。test 是前 500 个，train 是其余 6410 个，无 dev；不是从前 500 个随机划出 train/test。评测仍完整遍历 500 个任务，训练仍使用现有 curriculum 任务遍历。
+
+JSON 存在 bundled WebShop 的 `data/`，小商品索引单独放在 `search_engine/indexes_gigpo_small/`，旧全量 `indexes/` 不被替换。下载先写入 `data/.hf-download/`，校验大小与 SHA256 后才移动到目标位置；下载中断可重跑续传。已有文件校验不符会报错并保留原文件。同 profile 的索引重建成功后，旧索引保留为备份。
+
+旧全量商品/human goals 模式仍支持：数据准备、任务清单和启动均显式加 `--webshop-data-profile full_human`。它使用 `items_shuffle.json`（约 5.48 GB）、`items_ins_v2.json`（约 186 MB）及 human instructions，索引在 `indexes/`。不要将两个 profile 的 JSON、索引或 checkpoint 混用。
 
 若服务器不能直连 Hugging Face，可使用 [HF-Mirror](https://hf-mirror.com/) 或其他可访问的兼容端点：
 
@@ -138,7 +142,7 @@ python -m recipe.denoise_v2.task_suite.prepare_webshop_assets \
 
 也支持环境变量 `HF_ENDPOINT`。显式 `--hf-endpoint` 优先；下载公共数据时不发送已保存的 HF token。镜像连通性仍需在目标服务器验证，内网 pip 源不会代理 HF 或 Google Drive。Google Drive 保留为 `--source google-drive`，使用原始链接与 `.json.partial` 临时文件；原链接获取失败时建议改用 Hugging Face，无需重装环境。
 
-如果只能在其他机器下载，可从上面的固定版本获取这三个 JSON 并复制到 bundled WebShop 的 `data/`，随后在训练服务器执行 `python -m recipe.denoise_v2.task_suite.prepare_webshop_assets --build-index`。第一次迁移建议重建完整索引，避免沿用旧脚本生成的小商品集索引。旧的 Google Drive `.partial` 不会被当成完整数据或拼接到 HF 下载。
+如果只能在其他机器下载，可从上面的固定版本获取这三个 JSON 并复制到 bundled WebShop 的 `data/`，随后在训练服务器执行 `python -m recipe.denoise_v2.task_suite.prepare_webshop_assets --build-index`。第一次迁移应为选定 profile 重建索引，不能沿用其他商品集的索引。旧的 Google Drive `.partial` 不会被当成完整数据或拼接到 HF 下载。
 
 仅需要 `en_core_web_sm`，已随依赖安装；不下载 `en_core_web_lg`。不需要启动 Flask 服务或真实浏览器。旧 `webshop/setup.sh` 默认禁用，防止再次修改当前环境；仅显式设置 `WEBSHOP_ALLOW_LEGACY_INSTALL=1` 才能运行旧流程，新训练流程无需该开关。
 

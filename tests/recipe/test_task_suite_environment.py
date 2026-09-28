@@ -257,7 +257,7 @@ class AssetRecoveryTests(unittest.TestCase):
     def setUp(self):
         # Small files exercise the same integrity checks without downloading GBs.
         checksum = hashlib.sha256(b"{}").hexdigest()
-        patcher = patch.object(assets, "ASSET_CHECKSUMS", {name: (2, checksum) for name in assets.ASSETS})
+        patcher = patch.object(assets, "ASSET_CHECKSUMS", {name: (2, checksum) for name in {**assets.ASSETS, **assets.SMALL_ASSETS}})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -361,7 +361,7 @@ class AssetRecoveryTests(unittest.TestCase):
                         output = Path(command[command.index("--index") + 1])
                         output.mkdir()
                         (output / "new").write_text("new-index")
-                with patch.object(sys, "argv", ["prepare_assets", "--build-index"]), \
+                with patch.object(sys, "argv", ["prepare_assets", "--build-index", "--webshop-data-profile", "full_human"]), \
                      patch.object(assets, "WEBSHOP", root), \
                      patch.object(assets, "require_webshop_environment"), \
                      patch.object(assets.subprocess, "run", side_effect=run), redirect_stdout(io.StringIO()):
@@ -379,7 +379,7 @@ class AssetRecoveryTests(unittest.TestCase):
                     self.assertEqual((search / "indexes/new").read_text(), "new-index")
                     backup, = search.glob("indexes.backup-*")
                     self.assertEqual((backup / "old").read_text(), "old-index")
-                self.assertEqual(list(search.glob(".full-index-*")), [])
+                self.assertEqual(list(search.glob(".profile-index-*")), [])
 
     def test_missing_new_index_restores_old_index_after_failed_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -390,12 +390,42 @@ class AssetRecoveryTests(unittest.TestCase):
             (root / "search_engine/indexes").mkdir(parents=True)
             old = root / "search_engine/indexes/old"
             old.write_text("old-index")
-            with patch.object(sys, "argv", ["prepare_assets", "--build-index"]), \
+            with patch.object(sys, "argv", ["prepare_assets", "--build-index", "--webshop-data-profile", "full_human"]), \
                  patch.object(assets, "WEBSHOP", root), patch.object(assets, "require_webshop_environment"), \
                  patch.object(assets.subprocess, "run"), redirect_stdout(io.StringIO()):
                 with self.assertRaises(FileNotFoundError):
                     assets.main()
             self.assertEqual(old.read_text(), "old-index")
+
+    def test_small_profile_builds_separate_index_and_never_downloads_full_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "data").mkdir()
+            search = root / "search_engine"
+            (search / "indexes").mkdir(parents=True)
+            (search / "indexes/old").write_text("full-index")
+            downloads, commands = [], []
+            def download(filename, data, *args):
+                downloads.append(filename)
+                path = data / (filename + ".partial")
+                path.write_text("{}")
+                return path
+            def run(command, **kwargs):
+                commands.append(command)
+                if "pyserini.index.lucene" in command:
+                    output = Path(command[command.index("--index") + 1])
+                    output.mkdir()
+                    (output / "new").write_text("small-index")
+            with patch.object(sys, "argv", ["prepare_assets", "--download", "--build-index"]), \
+                 patch.object(assets, "WEBSHOP", root), patch.object(assets, "require_webshop_environment"), \
+                 patch.object(assets, "download_asset", side_effect=download), \
+                 patch.object(assets.subprocess, "run", side_effect=run), redirect_stdout(io.StringIO()):
+                assets.main()
+            self.assertEqual(downloads, ["items_shuffle_1000.json", "items_ins_v2_1000.json", "items_human_ins.json"])
+            self.assertEqual((search / "indexes/old").read_text(), "full-index")
+            self.assertEqual((search / "indexes_gigpo_small/new").read_text(), "small-index")
+            self.assertIn(str(root / "data/items_shuffle_1000.json"), commands[0])
+            self.assertIn(str(root / "data/items_ins_v2_1000.json"), commands[0])
 
     def test_webshop_text_registration_does_not_import_browser_dependencies(self):
         registration = types.ModuleType("gym.envs.registration")

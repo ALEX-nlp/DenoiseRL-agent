@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from urllib.parse import urlparse
+from agent_system.webshop_protocol import WEBSHOP_DATA_PROFILES, webshop_data_profile
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MODEL_ROOT = Path("/inspire/hdd/global_user/xucaijun-253108120121/Model")
@@ -83,14 +84,19 @@ def build_overrides(args):
     eval_split = args.eval_split or ("dev" if scienceworld and training else "test")
     if scienceworld and training and eval_split != "dev":
         raise ValueError("Use dev for training monitoring; test is reserved for the final evaluation")
-    data_dir = Path(args.data_dir or ROOT / "recipe/denoise_v2/local_data" / args.benchmark).expanduser().resolve()
+    webshop_profile = getattr(args, "webshop_data_profile", "gigpo_small")
+    small = not scienceworld and webshop_profile == "gigpo_small"
+    if small and eval_split == "dev":
+        raise ValueError("GiGPO small has no dev split; use the complete test split")
+    data_name = "webshop_gigpo_small" if small else args.benchmark
+    data_dir = Path(args.data_dir or ROOT / "recipe/denoise_v2/local_data" / data_name).expanduser().resolve()
     model_root = os.getenv("MODEL_ROOT")
     def model_path(env_key, default):
         path = os.getenv(env_key)
         if path is None:
             return str(Path(model_root or DEFAULT_MODEL_ROOT) / default)
         return str(Path(model_root) / path) if model_root and not Path(path).is_absolute() else path
-    experiment = os.getenv("EXPERIMENT_NAME", f"{args.benchmark}_{args.method}_7b_seed{args.seed}" + ("_swiftsage_n8_t50" if scienceworld else ""))
+    experiment = os.getenv("EXPERIMENT_NAME", f"{args.benchmark}_{args.method}_7b_seed{args.seed}" + ("_swiftsage_n8_t50" if scienceworld else "_gigpo_small" if small else ""))
     values = {
         "data.train_files": str(data_dir / "train.parquet"),
         "data.val_files": str(data_dir / f"{eval_split}.parquet"),
@@ -160,6 +166,9 @@ def build_overrides(args):
         # Use the same evaluation protocol for baseline/denoise and dev/test,
         # independently of training rollout sampling.
         values.update({
+            "env.task_suite.webshop_data_profile": webshop_profile,
+            "env.webshop.use_small": small,
+            "env.webshop.human_goals": webshop_data_profile(webshop_profile)["human_goals"],
             "env.task_suite.reward_mode": "success" if training else "score",
             "env.task_suite.success_reward": 10.0,
             "env.task_suite.eval_expected_tasks": 500 if eval_split == "test" else None,
@@ -245,6 +254,7 @@ def main():
     parser.add_argument("--method", choices=["baseline", "denoise"], default="denoise")
     parser.add_argument("--mode", choices=["train", "eval"], default="train")
     parser.add_argument("--data-dir", default=os.getenv("TASK_DATA_DIR"))
+    parser.add_argument("--webshop-data-profile", choices=WEBSHOP_DATA_PROFILES, default="gigpo_small")
     parser.add_argument("--eval-split", choices=["dev", "test"], default=None)
     parser.add_argument("--eval-protocol", choices=["swiftsage", "full"], default="swiftsage",
                         help="ScienceWorld: paper's first 10 test variations per type, or all native test variations")
